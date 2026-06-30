@@ -1,39 +1,37 @@
-## 1.  Idea
+# AI Token Budgeter — Product & Engineering Plan
 
-An AI insurance Proxy that prevents financial loss by enforcing real-time token/cost budgets for production LLM calls. It sits between the application and the model provider, functioning as an intelligent circuit breaker. 
+## 1. Problem Statement
 
-## 2.  Technical Architecture
+An AI budget enforcement proxy that sits between application and LLM provider APIs, preventing runaway spend by enforcing per-bucket token/cost budgets in real time. It functions as an intelligent circuit breaker: block requests when budget is exhausted, track actual usage from provider responses, and **never take down production LLM traffic** when the enforcement layer itself is degraded.
 
-1. Data Plane: GO-based Reverse Proxy using net/http/httputil
-2. State Store: Redis (using Lua scripts for atomic “check-and-decrement” operations).
-3. Communication:
-    1. Upstream: Transparent pass-through to OpenAI/Anthropic APIs
-    2. Downstream: Server-Side-Events (SSE) streaming with non-blocking usage metadata collection. 
-4. Fail-Open-Safety: If the proxy or Redis is unreachable, the proxy MUST forward the request to the backend to ensure production availability is never compromised.  
+**Non-goals (MVP):** Multi-provider cost normalization dashboard, billing/invoicing, client SDK, WebSocket/gRPC protocols.
 
-## 3.  Core Functional Requirements
+---
 
-1. Transparent Proxying: Forward all headers, paths and payloads to the target model provider. 
-2. Budget Buckets: Maintain user_id or bucket_id budgets in Redis. 
-3. Circuit Breaker: 
-    1. Pre-request: Check if budget balance > 0
-    2. If budget == 0: return http 402/429 immediately.
-4. Streaming Token Tracking:
-    1. do not buffer the response 
-    2. skim the final “usage” metadata chunk in the SSE stream to update the Redis balance asynchronously 
+## 2. Technical Architecture
 
-## 4.  Senior Engineer Critique & Risk Mitigation
+### 2.1 Components
 
-- **Bottleneck:** High-concurrency Redis checks.
-    - *Solution:* Use Redis Lua scripts (`EVAL`) to combine state checking and updating into one network round-trip.
-- **Edge Case:** Partial Stream Failures.
-    - *Solution:* If the final usage chunk is missing (due to network drop), the proxy should log a warning but not block the user.
-- **Performance:**
-    - Target: <5ms overhead per request.
-    - Optimization: Use `http.Transport` connection pooling (`MaxIdleConns`) to reuse backend connections.
+| Layer | Choice | Rationale |
+|-------|--------|-----------|
+| Data plane | Go reverse proxy (`net/http/httputil` + custom `ResponseWriter`/`Reader` tap) | Low latency, first-class concurrency |
+| State store | Redis 7+ with Lua scripts | Atomic reservation + settlement |
+| Upstream | Transparent pass-through to OpenAI / Anthropic HTTPS APIs | Drop-in replacement |
+| Downstream | SSE streaming passthrough (no full-body buffer) | Provider-compatible streaming |
+| Alerts | Slack webhook (budget exhausted, fail-open, settlement failures) | Minimal ops visibility |
 
-## 5.  MVP Roadmap (The 72-Hour Sprint)
+### 2.2 Budget Lifecycle (Reservation + Settlement)
 
-- **Day 1:** Go proxy scaffold (Transparent Pass-through + Connection Pooling).
-- **Day 2:** Redis Lua integration (Circuit Breaker logic).
-- **Day 3:** SSE Stream parser (Async usage metadata collection) + Slack Webhook integration.
+Two-phase atomic budget management — **not** check-then-async-decrement:
+
+1. **Pre-request (sync, blocking):** Lua script `reserve_budget` atomically holds `estimated_cost` against bucket balance. Returns `{allowed, reservation_id, remaining}` or `{allowed: false}`.
+2. **Post-response (async, non-blocking):** On usage extraction, Lua script `settle_budget` reconciles `actual_cost` vs reserved amount, releases hold, adjusts balance. Idempotent on `request_id`.
+3. **TTL safety net:** Unsettled reservations expire after `RESERVATION_TTL` (default 5m) via Redis key TTL; auto-release on proxy crash.
+
+```text
+Client → Proxy → [reserve_budget (Redis)] → Provider
+                      ↓ (if allowed)
+              Stream passthrough → Client
+                      ↓ (async)
+              settle_budget (Redis) ← usage extracted from response
+

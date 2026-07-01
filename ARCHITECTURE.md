@@ -1,0 +1,376 @@
+# AI Token Budgeter — Architecture
+
+This document explains the technical **why** behind design decisions. For what to build, see [PLAN.md](PLAN.md). For implementation constraints the builder must follow, see [.cursorrules](.cursorrules).
+
+---
+
+## 1. System Overview
+
+```text
+Client → Proxy → [reserve_budget (Redis)] → Provider (OpenAI / Anthropic)
+                      ↓ (if allowed)
+              Stream passthrough → Client
+                      ↓ (async)
+              settle_budget (Redis) ← usage extracted from response
+```
+
+| Layer | Choice | Rationale |
+|-------|--------|-----------|
+| Data plane | Go reverse proxy (`net/http/httputil` + custom `ResponseWriter`/`Reader` tap) | Low latency, first-class concurrency |
+| State store | Redis 7+ with Lua scripts | Atomic reservation + settlement in single round-trips |
+| Upstream | Transparent pass-through to OpenAI / Anthropic HTTPS APIs | Drop-in replacement for existing clients |
+| Downstream | SSE streaming passthrough (no full-body buffer) | Provider-compatible streaming without added latency |
+| Alerts | Slack webhook | Minimal ops visibility for fail-open and budget events |
+
+---
+
+## 2. The Two-Phase Budget Bug
+
+The original PRD described Lua scripts for atomic "check-and-decrement" but specified a flow of **check-before / decrement-after-async**. Under concurrency, this guarantees budget overspend.
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Proxy
+    participant Redis
+    participant Provider
+
+    Client->>Proxy: Request A (budget=100)
+    Client->>Proxy: Request B (budget=100)
+    Proxy->>Redis: GET balance
+    Redis-->>Proxy: 100
+    Proxy->>Redis: GET balance
+    Redis-->>Proxy: 100
+    Note over Proxy: Both pass pre-check
+    Proxy->>Provider: Forward A
+    Proxy->>Provider: Forward B
+    Provider-->>Proxy: SSE usage=80 each
+    Proxy-->>Client: Stream A
+    Proxy-->>Client: Stream B
+    Proxy->>Redis: Async DECR 80
+    Proxy->>Redis: Async DECR 80
+    Note over Redis: Balance=-60 (overspent)
+```
+
+**Root cause:** Pre-request `balance > 0` is not a reservation. Lua `EVAL` only provides atomicity when check and mutation happen in **one** script execution. Splitting them across the request lifecycle voids atomicity.
+
+**MVP fix — soft reservation:** Lua atomically reserves `estimated_max_tokens` before forwarding; after the stream completes, `settle_budget` reconciles actual vs reserved. Overspend is bounded by `concurrent_requests × reservation_estimate`.
+
+| Model | Behavior | Overspend Risk | Complexity |
+|-------|----------|----------------|------------|
+| **Soft reservation (chosen)** | Reserve estimate pre-request; reconcile post-stream | Low (bounded by estimate) | Medium |
+| Hard check-only | Check `> 0`, decrement actual usage async | High under concurrency | Low |
+| Pessimistic lock | Reserve full max context window per request | None, but low throughput | Medium |
+
+---
+
+## 3. Budget Lifecycle (Reservation + Settlement)
+
+Two-phase atomic budget management — **not** check-then-async-decrement:
+
+1. **Pre-request (sync, blocking):** Lua script `reserve_budget` atomically holds `estimated_cost` against bucket balance. Returns `{allowed, reservation_id, remaining}` or `{allowed: false}`.
+2. **Post-response (async, non-blocking):** On usage extraction, Lua script `settle_budget` reconciles `actual_cost` vs reserved amount, releases hold, adjusts balance. Idempotent on `request_id`.
+3. **TTL safety net:** Unsettled reservations expire after `RESERVATION_TTL` (default 5m) via Redis key TTL; auto-release on proxy crash.
+
+### Why async settlement?
+
+Settlement runs after the provider response is delivered. This keeps stream passthrough latency at zero — the user never waits for a Redis write to see the next SSE chunk.
+
+### Why idempotency on `request_id`?
+
+If Request B's pre-check runs before Request A's async decrement lands, B sees stale balance. Reservation at pre-check time eliminates this race. Idempotency on `request_id` prevents double-hold or double-settle on client retries.
+
+---
+
+## 4. Redis Data Model
+
+```
+budget:{bucket_id}           → INT (remaining budget units)
+reservation:{request_id}     → HASH {bucket_id, reserved, created_at}  TTL=RESERVATION_TTL
+```
+
+All mutations via Lua only. Application code must never use plain GET/DECR.
+
+### Hot key risk
+
+Redis is single-threaded per shard. A high-traffic `bucket_id` (e.g., shared org budget) serializes all concurrent requests on that key. Mitigations for post-MVP:
+
+- Shard budgets by `{bucket_id}:{time_window}` and aggregate for display
+- Local in-process token bucket cache with periodic Redis sync
+- Redis Cluster if single-shard QPS exceeds ~50–100k ops/sec
+
+---
+
+## 5. Redis Lua Script Specifications
+
+Load scripts with `SCRIPT LOAD` at startup; use `EVALSHA` in the hot path.
+
+### 5.1 `reserve_budget`
+
+```
+INPUT:  bucket_id, request_id, estimate
+ATOMIC:
+  - if reservation exists for request_id → return existing
+  - if budget[bucket_id] >= estimate → decrement estimate, create reservation, return OK
+  - else → return DENIED
+```
+
+### 5.2 `settle_budget`
+
+```
+INPUT:  request_id, actual_cost
+ATOMIC:
+  - if reservation not found → return OK (already settled or expired)
+  - delta = actual_cost - reserved
+  - adjust budget[bucket_id] by -delta (refund if actual < reserved)
+  - delete reservation
+```
+
+**Why two scripts, not one?** A single script cannot span the request lifecycle. Reservation and settlement are separate atomic operations at different points in time, each requiring full atomicity within its own execution.
+
+---
+
+## 6. Fail-Open State Machine
+
+**Principle:** User LLM responses are never blocked by enforcement infrastructure failures. Financial protection is **best-effort** during degraded mode. Fail-open preserves uptime; it does not preserve budget accuracy.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Healthy: Redis OK
+    Healthy --> Degraded: Redis slow or timeout
+    Degraded --> FailOpen: Forward + alert
+    FailOpen --> Healthy: Redis recovers
+    Degraded --> FailClosed: Optional tenant policy
+
+    note right of FailOpen
+        Alert ops immediately
+        Track fail_open_total
+        Reconcile budget drift post-recovery
+    end note
+```
+
+| State | Trigger | Proxy Behavior |
+|-------|---------|----------------|
+| **Healthy** | Redis p99 < 20ms | Full enforcement (reserve + settle) |
+| **Degraded** | Redis p99 > 20ms or intermittent timeouts | Forward + log warning; optional skip enforcement |
+| **FailOpen** | Redis unreachable or pre-check timeout (>50ms) | Forward to provider; increment `fail_open_total`; Slack CRITICAL alert |
+| **FailClosed** | Optional per-tenant policy | Return 503 (not default) |
+
+**Why not fail-closed by default?** The product promise is production availability. A Redis outage blocking all LLM traffic causes a full application outage — worse than a temporary budget enforcement gap.
+
+**Trade-off to accept:** During Redis outage, financial protection is suspended. Ops must be alerted immediately and budget drift reconciled after recovery.
+
+---
+
+## 7. Edge Case Policies
+
+| Edge Case | Policy | Rationale |
+|-----------|--------|-----------|
+| Concurrent requests, low balance | Reservation prevents overspend beyond `concurrent × estimate` | Two-phase bug fix |
+| Missing usage chunk | Settle at reserved amount (worst-case); log `usage_missing_total` | Don't block user response; don't leave reservation stuck |
+| Provider 4xx/5xx | Release reservation (full refund of hold) | No usage consumed; budget should not decrease |
+| Duplicate client retry (same `request_id`) | Idempotent reserve/settle | Prevent double-charge on network retry |
+| Redis down at pre-check | Fail-open forward + CRITICAL alert | Availability over enforcement |
+| Redis fails on async settle | Retry 3× with backoff; reservation released at TTL | Settlement is best-effort; TTL is safety net |
+| Upstream provider timeout | Release reservation; return 504 | No response delivered; no budget consumed |
+| Proxy crash mid-stream | Reservation TTL (5m) auto-expires unreconciled holds | Crash recovery without manual intervention |
+| Client disconnect mid-stream | Settle at reserved amount if usage not yet received | Provider may still charge |
+| gzip-encoded response | Decompress for usage tap only if `Content-Encoding: gzip` | Parser must see plaintext SSE/JSON |
+| Unknown provider format | Log error; settle at reserved | Fail-safe worst-case billing |
+| OpenAI: no usage in stream | Settle at reserved; reservation TTL as backstop | Legacy/error responses lack usage metadata |
+| Anthropic: usage in `message_stop` | Provider-specific extractor required | Different SSE schema than OpenAI |
+
+---
+
+## 8. Provider Usage Extraction
+
+Provider-specific usage extractors sit behind a Go interface. Each extractor parses its provider's response format:
+
+- **OpenAI streaming:** `usage` field in final data chunk(s) before `[DONE]`
+- **OpenAI non-streaming:** `usage` in top-level JSON response body
+- **Anthropic streaming:** usage in `message_delta` / `message_stop` events
+- **Anthropic non-streaming:** `usage` in response JSON
+
+Non-streaming path is required for MVP. Clients that disable streaming would bypass budget enforcement entirely if only SSE is handled.
+
+---
+
+## 9. Observability
+
+| Metric | Type | Purpose |
+|--------|------|---------|
+| `budget_check_total{result}` | Counter | allowed / denied / fail_open |
+| `budget_reserve_duration_seconds` | Histogram | Pre-check latency (5ms p99 target) |
+| `budget_settle_total{result}` | Counter | success / retry / missing_usage |
+| `fail_open_total` | Counter | Redis/degraded bypass — invisible without this |
+| `reservation_unsettled` | Gauge | Reservations past expected settle time |
+
+Structured JSON logs per request: `{request_id, bucket_id, reserved, actual, mode, outcome}`.
+
+Fail-open without metrics is invisible until the bill arrives. These metrics are the minimum viable observability layer.
+
+---
+
+## 10. Performance Targets
+
+- **p99 pre-check overhead:** <5ms — applies to pre-request path only, excludes provider RTT; assumes Redis RTT <2ms
+- **Stream passthrough:** zero additional buffering latency — tee via `io.Copy` with flush-per-chunk
+- **Redis pool:** min 10 idle connections; 50ms command timeout before fail-open
+- **Async settlement:** adds zero user-facing latency
+
+HTTP `Transport` connection pooling addresses upstream latency. Redis connection pooling (`go-redis` with `PoolSize`, `MinIdleConns`) addresses state store latency. Both are required.
+
+---
+
+## 11. Day 2 Implementation Guide
+
+This section maps the Redis Budget Engine onto the existing Day 1 scaffold on branch `redis-engine`.
+
+### 11.1 What Day 1 Already Provides
+
+| Component | Location | Day 2 action |
+|-----------|----------|--------------|
+| `BudgetChecker` interface | `internal/proxy/enforcement.go` | Implement as `RedisBudgetChecker` |
+| `Enforcement.PreCheck` | same | No changes — fail-open + mode logic done |
+| `noopChecker` fallback | same | Replace in `main.go` with Redis impl |
+| 429 response | `handler.go:writeBudgetDenied` | No changes |
+| `ReadinessChecker` interface | `internal/proxy/server.go` | Implement Redis ping |
+| Header stripping | `headers.go` | No changes |
+| `estimate=0` hardcode | `handler.go:55` | Replace with parsed `max_tokens` |
+
+### 11.2 Request Flow (Day 2)
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Handler
+    participant Estimate
+    participant Redis
+    participant Provider
+
+    Client->>Handler: POST /v1/chat/completions
+    Handler->>Handler: request_id = X-Request-Id or UUID
+    Handler->>Estimate: parse max_tokens from body
+    Estimate-->>Handler: estimate = max_tokens + buffer
+    Handler->>Redis: EVALSHA reserve_budget
+    alt budget insufficient + enforce
+        Redis-->>Handler: DENIED
+        Handler-->>Client: 429
+    else Redis error or timeout
+        Handler-->>Client: fail-open forward
+    else allowed
+        Redis-->>Handler: OK, reserved=N
+        Handler->>Provider: forward request
+        alt upstream 4xx/5xx
+            Provider-->>Handler: error response
+            Handler->>Redis: EVALSHA release_budget
+            Handler-->>Client: provider response
+        else upstream 200
+            Provider-->>Handler: response body
+            Note over Handler,Redis: reservation held until TTL
+            Note over Handler,Redis: Day 3: settle_budget with real usage
+            Handler-->>Client: passthrough response
+        end
+    end
+```
+
+### 11.3 Package Layout
+
+```
+internal/budget/
+  client.go          # go-redis wrapper, script loading, health ping
+  checker.go         # RedisBudgetChecker (Reserve)
+  settlement.go      # Release, Settle methods
+  estimate.go        # JSON body max_tokens parser
+  metrics.go         # prometheus or atomic counters (MVP: simple counters)
+  lua/
+    reserve_budget.lua
+    settle_budget.lua
+    release_budget.lua
+  *_test.go          # miniredis tests
+```
+
+### 11.4 Lua Scripts (Day 2)
+
+#### `reserve_budget`
+
+```
+KEYS[1] = budget:{bucket_id}
+KEYS[2] = reservation:{request_id}
+ARGV[1] = estimate (integer tokens)
+ARGV[2] = ttl_seconds
+
+if reservation exists → return {1, reserved, remaining}  -- idempotent OK
+if budget >= estimate →
+  DECRBY budget estimate
+  HSET reservation bucket_id, reserved, created_at
+  EXPIRE reservation ttl
+  return {1, estimate, new_balance}
+else → return {0, 0, current_balance}  -- DENIED
+```
+
+#### `release_budget` (new — Day 2 wiring)
+
+```
+KEYS[1] = reservation:{request_id}
+KEYS[2] = budget:{bucket_id}  (looked up from reservation hash)
+
+if reservation missing → return OK
+refund = reserved amount from hash
+INCRBY budget refund
+DEL reservation
+return OK
+```
+
+#### `settle_budget` (implement + test; wire in Day 3)
+
+```
+KEYS[1] = reservation:{request_id}
+KEYS[2] = budget:{bucket_id}
+
+if reservation missing → return OK
+delta = actual - reserved
+if delta > 0 → DECRBY budget delta
+if delta < 0 → INCRBY budget abs(delta)
+DEL reservation
+return OK
+```
+
+### 11.5 Estimate Parsing
+
+For OpenAI chat completions request body:
+
+```json
+{"model": "gpt-4o", "messages": [...], "max_tokens": 1024, "stream": true}
+```
+
+`estimate = max_tokens + PROMPT_TOKEN_BUFFER` (default buffer 512).
+
+Edge cases:
+- Body already consumed by reverse proxy: use `httputil` Director or wrap `r.Body` with `io.TeeReader` / read-and-restore pattern so upstream still receives full body
+- `max_tokens` omitted: use `DEFAULT_RESERVATION_ESTIMATE` (4096)
+- Invalid JSON: use default; log warning
+- `bucket_id` empty: skip reservation in `off` mode; in `shadow`/`enforce` log warning and fail-open (no bucket = can't enforce)
+
+### 11.6 Reservation Hold Until Day 3
+
+On upstream 200, the reservation remains in Redis until:
+1. Day 3 `settle_budget` reconciles with actual usage, OR
+2. `RESERVATION_TTL` expires (auto-release — budget refunded)
+
+**Implication for Day 2 testing:** After N successful requests, bucket balance reflects N holds (not N actual usages). Test 429/deny and fail-open with this model; test accurate balance only after Day 3 settlement or after TTL expiry.
+
+### 11.7 `/readyz` vs Fail-Open
+
+`/readyz` returns 503 when Redis ping fails — tells orchestrator the enforcement layer is degraded. The proxy **continues serving LLM traffic fail-open**. These are intentionally decoupled.
+
+### 11.8 Day 2 Definition of Done
+
+- [ ] `RedisBudgetChecker.Reserve` wired; handler passes real estimate
+- [ ] Lua scripts pass miniredis unit tests (reserve, release, settle, idempotency, concurrency)
+- [ ] Enforce mode: exhausted bucket returns 429 without upstream call
+- [ ] Redis down/timeout: fail-open forward + `fail_open_total` incremented
+- [ ] Upstream 4xx/5xx: `release_budget` called; balance restored
+- [ ] `/readyz` returns 503 when Redis unreachable
+- [ ] Slack/log alert on fail-open and budget denied
+- [ ] Integration tests for 429 and fail-open paths

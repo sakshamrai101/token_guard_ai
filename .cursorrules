@@ -1,0 +1,154 @@
+# AI Token Budgeter — Engineering Standards
+
+Read PLAN.md for MVP scope and ARCHITECTURE.md for design rationale.
+
+---
+
+## Language & Stack
+
+- Go 1.22+ for the data plane proxy
+- Redis 7+ for budget state (via `go-redis`)
+- Lua scripts for all Redis mutations — no exceptions
+- `net/http/httputil` for reverse proxy base; custom `ResponseWriter`/`io.Reader` tap for stream inspection
+
+---
+
+## Budget Atomicity (Non-Negotiable)
+
+- NEVER use plain Redis GET/DECR from application code. All budget mutations MUST go through Lua scripts.
+- MUST implement two scripts: `reserve_budget` (pre-request) and `settle_budget` (post-response). Do NOT combine into a single check-then-blind-decrement flow.
+- Pre-request check MUST atomically reserve `estimated_cost`, not merely verify `balance > 0`.
+- Settlement MUST be idempotent on `request_id`. Duplicate calls return existing state, never double-adjust.
+- Load Lua scripts with `SCRIPT LOAD` at startup; use `EVALSHA` in the hot path.
+
+---
+
+## Fail-Open Policy (Non-Negotiable)
+
+- If Redis is unreachable OR pre-check times out (>50ms): MUST forward request to provider. NEVER return an error to the client due to enforcement infrastructure failure.
+- Increment `fail_open_total` metric on every fail-open bypass.
+- Fire Slack CRITICAL alert on fail-open events (Day 2+, not Day 3).
+- `/readyz` returns 503 when Redis unreachable (for orchestration). The proxy process MUST still serve LLM traffic fail-open.
+- Budget exhausted in `enforce` mode: return **429** with `Retry-After` and JSON error body. Do NOT forward to provider.
+- Do NOT use HTTP 402. Clients rarely handle it.
+- Default `ENFORCEMENT_MODE=shadow` until explicitly promoted to `enforce`.
+
+### Enforcement Modes
+
+| Mode | Pre-check | Settlement | Block on exhausted? |
+|------|-----------|------------|---------------------|
+| `off` | Skip | Skip | No |
+| `shadow` | Run + log | Run + log | No |
+| `enforce` | Run | Run | Yes (429) |
+
+---
+
+## Connection Pooling
+
+- HTTP upstream: configure `http.Transport` with `MaxIdleConns`, `MaxIdleConnsPerHost`, `IdleConnTimeout`.
+- Redis: configure `go-redis` with `PoolSize` >= 10, `MinIdleConns` >= 10, command timeout 50ms.
+- Both pools are required. HTTP pooling alone is insufficient.
+
+---
+
+## Header Handling
+
+- Forward method, path, query string, and body unchanged.
+- MUST rewrite `Host` to the provider hostname.
+- MUST strip hop-by-hop headers: `Connection`, `Keep-Alive`, `Transfer-Encoding`, `Upgrade`, `TE`, `Trailer`.
+- MUST NOT forward internal headers upstream: `X-Budget-Bucket-Id`, `X-Request-Id` (unless provider expects it).
+- MUST NOT log `Authorization` headers.
+- Bucket identity comes from trusted source (gateway injection or mTLS). Do NOT trust client-supplied bucket headers in production.
+
+---
+
+## Stream Handling Constraints
+
+- MUST NOT buffer the full response body for streaming requests. Tee bytes to client as they arrive.
+- SSE parser MUST be a proper state machine handling comments, blank lines, and interleaved events.
+- Provider-specific usage extractors MUST sit behind a Go interface (`UsageExtractor`).
+- MUST support both streaming (SSE) and non-streaming (JSON body) response paths.
+- On client disconnect (`Context.Done()` or write error): settle at reserved amount if usage not yet received.
+- On missing usage metadata: settle at reserved amount (worst-case). Log `usage_missing_total`. Do NOT block the user response.
+- On provider 4xx/5xx: release reservation (full refund of hold).
+- If `Content-Encoding: gzip`: decompress for usage tap only; pass original encoding to client.
+- Goroutine lifecycle: SSE tap MUST NOT leak goroutines on client disconnect. Verify with load test (1000 aborted streams).
+
+---
+
+## Idempotency
+
+- Every request MUST have a `request_id` from `X-Request-Id` header or a generated UUID.
+- Lua `reserve_budget` MUST detect duplicate `request_id` and return existing reservation.
+- Lua `settle_budget` MUST detect already-settled or expired reservations and return OK.
+
+---
+
+## Reservation TTL
+
+- Unsettled reservations MUST have Redis key TTL (`RESERVATION_TTL`, default 5m).
+- TTL auto-releases holds on proxy crash or settlement failure.
+- Settlement failures: retry 3x with backoff, then rely on TTL expiry.
+
+---
+
+## Performance Targets
+
+- p99 pre-check overhead: <5ms (excludes provider RTT).
+- Stream passthrough: zero additional buffering latency.
+- Async settlement adds zero user-facing latency.
+
+---
+
+## Observability (Required Metrics)
+
+Implement these from Day 2:
+
+- `budget_check_total{result}` — counter: allowed / denied / fail_open
+- `budget_reserve_duration_seconds` — histogram
+- `budget_settle_total{result}` — counter: success / retry / missing_usage
+- `fail_open_total` — counter
+- `reservation_unsettled` — gauge
+
+Structured JSON log per request: `{request_id, bucket_id, reserved, actual, mode, outcome}`.
+
+---
+
+## Security
+
+- Bucket ID must not be client-spoofable in production.
+- Do not log secrets (`Authorization`, API keys).
+- Rate-limit proxy admin endpoints (`/healthz`, `/readyz`).
+
+---
+
+## Testing Standards
+
+- Unit tests for Lua scripts using `miniredis`.
+- Integration test: proxy forwards to mock upstream (Day 1).
+- Integration test: N concurrent requests cannot overspend bucket (Day 3).
+- Recorded SSE fixtures per provider for parser tests (OpenAI + Anthropic).
+- Load test: no goroutine leaks on 1000 aborted streams.
+
+---
+
+## Code Style
+
+- Match existing Go conventions in the repo. Keep packages focused: `proxy`, `budget`, `usage`, `config`.
+- Minimize scope — no abstractions beyond what the MVP requires.
+- Comments only for non-obvious business logic (reservation/settlement lifecycle, fail-open rationale).
+- No over-engineering: two Lua scripts, one interface for usage extractors, one config struct.
+
+---
+
+## Day 2 Scope (Redis Budget Engine)
+
+- Budget unit: raw token count (integer in Redis).
+- Parse `max_tokens` from request JSON; estimate = max_tokens + PROMPT_TOKEN_BUFFER; fallback DEFAULT_RESERVATION_ESTIMATE.
+- Wire `RedisBudgetChecker` into existing `BudgetChecker` interface — do NOT rewrite enforcement mode logic.
+- Day 2 wires: `reserve_budget` (pre-request), `release_budget` (upstream 4xx/5xx in ModifyResponse).
+- Day 2 does NOT wire: `settle_budget` on 200 responses (Day 3 — usage parsing).
+- Generate UUID for `X-Request-Id` when absent.
+- Empty `X-Budget-Bucket-Id`: fail-open in shadow/enforce (cannot enforce without bucket).
+- Request body must be read-and-restored so upstream receives full payload after estimate parse.
+- Implement `release_budget` Lua script in addition to reserve/settle.

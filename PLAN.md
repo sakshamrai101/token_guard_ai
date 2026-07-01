@@ -73,12 +73,65 @@ For engineering constraints and standards, see [.cursorrules](.cursorrules). For
 
 ### Day 2 — Redis Budget Engine
 
-- `miniredis` unit tests for Lua scripts
-- `reserve_budget` + `settle_budget` wired to pre-request path
-- `ENFORCEMENT_MODE=shadow|enforce`
-- 429 on exhausted budget
-- Fail-open on Redis timeout/unreachable + `fail_open_total` metric
-- Slack alert on fail-open and budget denied events
+**Decisions (locked):**
+
+- Budget unit: **raw token count** (integer in Redis; maps 1:1 to provider `usage` in Day 3)
+- Reservation estimate: **parse `max_tokens` from request JSON body** (fallback to `DEFAULT_RESERVATION_ESTIMATE` env, e.g. 4096)
+- Settlement in Day 2: **reserve + release on upstream errors only**; successful 200 responses hold reservation until TTL — real `settle_budget` with usage metadata is Day 3
+
+**Deliverables:**
+
+1. **`internal/budget` package**
+   - `go-redis` client with pooled connections (`PoolSize` ≥ 10, `MinIdleConns` ≥ 10, 50ms command timeout)
+   - Embed Lua scripts; `SCRIPT LOAD` at startup; `EVALSHA` in hot path
+   - `RedisBudgetChecker` implementing `proxy.BudgetChecker` (`Reserve`)
+   - `Release(ctx, requestID)` for upstream 4xx/5xx (refund full hold)
+   - `Settle(ctx, requestID, actual)` — implement + test in miniredis, **not wired on 200 responses yet**
+
+2. **Lua scripts** (`internal/budget/lua/`)
+   - `reserve_budget` — atomic hold; idempotent on `request_id`
+   - `settle_budget` — reconcile actual vs reserved (Day 3 wiring)
+   - `release_budget` — full refund of hold on upstream error (Day 2 wiring)
+
+3. **Estimate extraction** (`internal/budget/estimate.go`)
+   - Peek/parse JSON request body for `max_tokens` (OpenAI chat completions shape)
+   - Add prompt-token buffer constant (e.g. `+512`) or env `PROMPT_TOKEN_BUFFER`
+   - If body unreadable or `max_tokens` absent → `DEFAULT_RESERVATION_ESTIMATE`
+
+4. **Wire into existing scaffold**
+   - `cmd/proxy/main.go`: construct `RedisBudgetChecker`, pass to `NewEnforcement`; Redis `ReadinessChecker` to `NewServer`
+   - `handler.go`: replace `estimate=0` with parsed estimate; call `Release` in `ModifyResponse` when `resp.StatusCode >= 400`
+   - Generate `X-Request-Id` UUID when header absent (needed for reservation keys)
+
+5. **Observability**
+   - `budget_check_total{result=allowed|denied|fail_open}`
+   - `budget_reserve_duration_seconds` histogram
+   - `fail_open_total` counter (increment in handler when `result.FailOpen`)
+   - Structured log per request: `{request_id, bucket_id, reserved, mode, outcome}`
+
+6. **Alerts**
+   - Slack webhook on fail-open (CRITICAL) and budget denied (WARN)
+   - Env: `SLACK_WEBHOOK_URL` (optional — log-only if unset)
+
+7. **Config additions**
+   - `REDIS_URL` (required when mode ≠ off)
+   - `RESERVATION_TTL_SEC` (default 300)
+   - `DEFAULT_RESERVATION_ESTIMATE` (default 4096)
+   - `PROMPT_TOKEN_BUFFER` (default 512)
+   - `REDIS_POOL_SIZE`, `REDIS_MIN_IDLE_CONNS`
+   - `SLACK_WEBHOOK_URL`
+
+8. **Tests**
+   - `miniredis`: reserve idempotency, deny when insufficient, concurrent reserves don't overspend, release refunds, settle reconciles
+   - Integration: exhausted bucket → 429 without upstream call (enforce mode)
+   - Integration: Redis down → request forwarded (fail-open)
+   - Integration: `/readyz` → 503 when Redis unreachable
+
+**Explicitly NOT Day 2:**
+
+- SSE/JSON usage parsing and async settlement on 200 responses (Day 3)
+- Concurrent overspend E2E with real usage settlement (Day 3)
+- Anthropic request body parsing (Day 3 unless trivial)
 
 ### Day 3 — Usage Extraction & Hardening
 
@@ -92,11 +145,14 @@ For engineering constraints and standards, see [.cursorrules](.cursorrules). For
 
 ---
 
-## Open Questions (Resolve Before Day 2)
+## Resolved Design Decisions
 
-1. Budget unit: USD micro-cents vs raw tokens?
-2. Bucket identity trust model for MVP (static config map vs gateway header)?
-3. Default `reservation_estimate` per model (static table vs parse from request JSON)?
+| Decision | Choice | Notes |
+|----------|--------|-------|
+| Budget unit | Raw token count | Integer in Redis; 1:1 with provider `usage` metadata |
+| Bucket identity | `X-Budget-Bucket-Id` header | Gateway-injected; already in Day 1 scaffold |
+| Reservation estimate | Parse `max_tokens` from request JSON | Fallback to `DEFAULT_RESERVATION_ESTIMATE` (4096) |
+| Day 2 settlement | Reserve + release on errors only | 200 responses hold until TTL; Day 3 settles with real usage |
 
 ---
 

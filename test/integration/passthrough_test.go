@@ -51,18 +51,20 @@ func TestTransparentPassthrough(t *testing.T) {
 	defer upstream.Close()
 
 	cfg := config.Config{
-		UpstreamURL:     upstream.URL,
-		UpstreamHost:    "mock.openai.test",
-		EnforcementMode: config.EnforcementOff,
-		MaxIdleConns:    10,
-		MaxIdlePerHost:  10,
-		IdleConnTimeout: 90 * time.Second,
-		PreCheckTimeout: 50 * time.Millisecond,
+		UpstreamURL:           upstream.URL,
+		UpstreamHost:          "mock.openai.test",
+		EnforcementMode:       config.EnforcementOff,
+		MaxIdleConns:          10,
+		MaxIdlePerHost:        10,
+		IdleConnTimeout:       90 * time.Second,
+		PreCheckTimeout:       50 * time.Millisecond,
+		DefaultReservationEst: 4096,
+		PromptTokenBuffer:     512,
 	}
 
 	transport := proxy.NewTransport(cfg)
 	enforcement := proxy.NewEnforcement(cfg, nil, nil)
-	handler, err := proxy.NewHandler(cfg, transport, enforcement, nil)
+	handler, err := proxy.NewHandler(cfg, transport, enforcement, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}

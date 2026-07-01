@@ -11,11 +11,14 @@ import (
 type PreCheckResult struct {
 	Allowed  bool
 	FailOpen bool
+	Reserved int64
 }
+
 
 type BudgetChecker interface {
 	Reserve(ctx context.Context, bucketID, requestID string, estimate int64) (PreCheckResult, error)
 }
+
 
 type noopChecker struct{}
 
@@ -72,8 +75,8 @@ func (e *Enforcement) PreCheck(ctx context.Context, bucketID, requestID string, 
 	}
 
 	if !result.Allowed && e.mode == config.EnforcementEnforce {
-		return PreCheckResult{Allowed: false}
+		return PreCheckResult{Allowed: false, Reserved: result.Reserved}
 	}
 
-	return PreCheckResult{Allowed: true, FailOpen: result.FailOpen}
+	return PreCheckResult{Allowed: true, FailOpen: result.FailOpen, Reserved: result.Reserved}
 }

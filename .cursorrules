@@ -138,3 +138,17 @@ Structured JSON log per request: `{request_id, bucket_id, reserved, actual, mode
 - Minimize scope — no abstractions beyond what the MVP requires.
 - Comments only for non-obvious business logic (reservation/settlement lifecycle, fail-open rationale).
 - No over-engineering: two Lua scripts, one interface for usage extractors, one config struct.
+
+---
+
+## Day 2 Scope (Redis Budget Engine)
+
+- Budget unit: raw token count (integer in Redis).
+- Parse `max_tokens` from request JSON; estimate = max_tokens + PROMPT_TOKEN_BUFFER; fallback DEFAULT_RESERVATION_ESTIMATE.
+- Wire `RedisBudgetChecker` into existing `BudgetChecker` interface — do NOT rewrite enforcement mode logic.
+- Day 2 wires: `reserve_budget` (pre-request), `release_budget` (upstream 4xx/5xx in ModifyResponse).
+- Day 2 does NOT wire: `settle_budget` on 200 responses (Day 3 — usage parsing).
+- Generate UUID for `X-Request-Id` when absent.
+- Empty `X-Budget-Bucket-Id`: fail-open in shadow/enforce (cannot enforce without bucket).
+- Request body must be read-and-restored so upstream receives full payload after estimate parse.
+- Implement `release_budget` Lua script in addition to reserve/settle.

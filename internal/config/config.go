@@ -24,6 +24,15 @@ type Config struct {
 	MaxIdlePerHost   int
 	IdleConnTimeout  time.Duration
 	PreCheckTimeout  time.Duration
+
+	RedisURL              string
+	RedisPoolSize         int
+	RedisMinIdleConns     int
+	RedisCommandTimeout   time.Duration
+	ReservationTTL        time.Duration
+	DefaultReservationEst int64
+	PromptTokenBuffer     int64
+	SlackWebhookURL       string
 }
 
 func Load() (Config, error) {
@@ -54,15 +63,53 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("PRECHECK_TIMEOUT_MS: %w", err)
 	}
 
+	redisURL := getEnv("REDIS_URL", "redis://localhost:6379")
+	redisPoolSize, err := strconv.Atoi(getEnv("REDIS_POOL_SIZE", "10"))
+	if err != nil {
+		return Config{}, fmt.Errorf("REDIS_POOL_SIZE: %w", err)
+	}
+	redisMinIdle, err := strconv.Atoi(getEnv("REDIS_MIN_IDLE_CONNS", "10"))
+	if err != nil {
+		return Config{}, fmt.Errorf("REDIS_MIN_IDLE_CONNS: %w", err)
+	}
+	redisTimeoutMs, err := strconv.Atoi(getEnv("REDIS_COMMAND_TIMEOUT_MS", "50"))
+	if err != nil {
+		return Config{}, fmt.Errorf("REDIS_COMMAND_TIMEOUT_MS: %w", err)
+	}
+	reservationTTLSec, err := strconv.Atoi(getEnv("RESERVATION_TTL_SEC", "300"))
+	if err != nil {
+		return Config{}, fmt.Errorf("RESERVATION_TTL_SEC: %w", err)
+	}
+	defaultEst, err := strconv.ParseInt(getEnv("DEFAULT_RESERVATION_ESTIMATE", "4096"), 10, 64)
+	if err != nil {
+		return Config{}, fmt.Errorf("DEFAULT_RESERVATION_ESTIMATE: %w", err)
+	}
+	promptBuffer, err := strconv.ParseInt(getEnv("PROMPT_TOKEN_BUFFER", "512"), 10, 64)
+	if err != nil {
+		return Config{}, fmt.Errorf("PROMPT_TOKEN_BUFFER: %w", err)
+	}
+
+	if mode != EnforcementOff && redisURL == "" {
+		return Config{}, fmt.Errorf("REDIS_URL is required when ENFORCEMENT_MODE is not off")
+	}
+
 	return Config{
-		ListenAddr:      getEnv("LISTEN_ADDR", ":8080"),
-		UpstreamURL:     upstreamURL,
-		UpstreamHost:    upstreamHost,
-		EnforcementMode: mode,
-		MaxIdleConns:    maxIdle,
-		MaxIdlePerHost:  maxIdlePerHost,
-		IdleConnTimeout: time.Duration(idleTimeoutSec) * time.Second,
-		PreCheckTimeout: time.Duration(preCheckTimeoutMs) * time.Millisecond,
+		ListenAddr:            getEnv("LISTEN_ADDR", ":8080"),
+		UpstreamURL:           upstreamURL,
+		UpstreamHost:          upstreamHost,
+		EnforcementMode:       mode,
+		MaxIdleConns:          maxIdle,
+		MaxIdlePerHost:        maxIdlePerHost,
+		IdleConnTimeout:       time.Duration(idleTimeoutSec) * time.Second,
+		PreCheckTimeout:       time.Duration(preCheckTimeoutMs) * time.Millisecond,
+		RedisURL:              redisURL,
+		RedisPoolSize:         redisPoolSize,
+		RedisMinIdleConns:     redisMinIdle,
+		RedisCommandTimeout:   time.Duration(redisTimeoutMs) * time.Millisecond,
+		ReservationTTL:        time.Duration(reservationTTLSec) * time.Second,
+		DefaultReservationEst: defaultEst,
+		PromptTokenBuffer:     promptBuffer,
+		SlackWebhookURL:       getEnv("SLACK_WEBHOOK_URL", ""),
 	}, nil
 }
 

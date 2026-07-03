@@ -10,3 +10,6 @@ var releaseBudgetLua string
 
 //go:embed lua/settle_budget.lua
 var settleBudgetLua string
+
+//go:embed lua/set_budget.lua
+var setBudgetLua string

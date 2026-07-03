@@ -62,7 +62,7 @@ func newBudgetTestStack(t *testing.T, mode config.EnforcementMode, bucketBalance
 		t.Fatalf("NewHandler: %v", err)
 	}
 	readiness := budget.NewReadiness(client)
-	proxyServer := proxy.NewServer(cfg, handler, readiness, nil)
+	proxyServer := proxy.NewServer(cfg, handler, nil, readiness, nil)
 
 	ts := httptest.NewServer(proxyServer)
 	t.Cleanup(func() {

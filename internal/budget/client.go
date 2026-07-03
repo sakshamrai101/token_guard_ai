@@ -10,11 +10,12 @@ import (
 )
 
 type Client struct {
-	rdb         *redis.Client
-	reserveSHA  string
-	releaseSHA  string
-	settleSHA   string
-	ttl         time.Duration
+	rdb          *redis.Client
+	reserveSHA   string
+	releaseSHA   string
+	settleSHA    string
+	setBudgetSHA string
+	ttl          time.Duration
 }
 
 func NewClient(cfg config.Config) (*Client, error) {
@@ -69,6 +70,10 @@ func (c *Client) loadScripts(ctx context.Context) error {
 	c.settleSHA, err = c.rdb.ScriptLoad(ctx, settleBudgetLua).Result()
 	if err != nil {
 		return fmt.Errorf("load settle_budget: %w", err)
+	}
+	c.setBudgetSHA, err = c.rdb.ScriptLoad(ctx, setBudgetLua).Result()
+	if err != nil {
+		return fmt.Errorf("load set_budget: %w", err)
 	}
 	return nil
 }

@@ -68,7 +68,7 @@ func TestTransparentPassthrough(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
-	server := proxy.NewServer(cfg, handler, nil, nil)
+	server := proxy.NewServer(cfg, handler, nil, nil, nil)
 
 	proxyServer := httptest.NewServer(server)
 	defer proxyServer.Close()
@@ -111,7 +111,7 @@ func TestHealthEndpoints(t *testing.T) {
 		UpstreamURL:     "http://example.com",
 		EnforcementMode: config.EnforcementOff,
 	}
-	server := proxy.NewServer(cfg, http.NotFoundHandler(), nil, nil)
+	server := proxy.NewServer(cfg, http.NotFoundHandler(), nil, nil, nil)
 	ts := httptest.NewServer(server)
 	defer ts.Close()
 
@@ -132,7 +132,7 @@ func TestReadyzNotReady(t *testing.T) {
 		UpstreamURL:     "http://example.com",
 		EnforcementMode: config.EnforcementOff,
 	}
-	server := proxy.NewServer(cfg, http.NotFoundHandler(), stubNotReady{}, nil)
+	server := proxy.NewServer(cfg, http.NotFoundHandler(), nil, stubNotReady{}, nil)
 	ts := httptest.NewServer(server)
 	defer ts.Close()
 

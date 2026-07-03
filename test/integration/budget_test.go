@@ -192,7 +192,7 @@ func TestReleaseBudgetOnUpstream4xx(t *testing.T) {
 	}
 }
 
-func TestSuccessful200HoldsReservationUntilTTL(t *testing.T) {
+func TestStreamingMissingUsageSettlesAtReserved(t *testing.T) {
 	stack := newBudgetTestStack(t, config.EnforcementEnforce, 5000, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n")
@@ -212,23 +212,25 @@ func TestSuccessful200HoldsReservationUntilTTL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Do: %v", err)
 	}
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		t.Fatalf("read stream: %v", err)
+	}
 	resp.Body.Close()
 
-	// estimate = 100 + 512 = 612 held, not settled on 200
-	balStr, err := stack.mr.Get("budget:test-bucket")
-	if err != nil {
-		t.Fatalf("get balance: %v", err)
+	waitForBalance(t, stack.mr, "budget:test-bucket", 4388, 2*time.Second)
+	waitForNoReservation(t, stack.mr, "reservation:req-hold", 2*time.Second)
+}
+
+func waitForNoReservation(t *testing.T, mr *miniredis.Miniredis, key string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if !mr.Exists(key) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	bal, err := strconv.ParseInt(balStr, 10, 64)
-	if err != nil {
-		t.Fatalf("parse balance: %v", err)
-	}
-	if bal != 4388 {
-		t.Fatalf("balance = %d, want 4388 (hold active, no settle on 200)", bal)
-	}
-	if !stack.mr.Exists("reservation:req-hold") {
-		t.Fatal("reservation should still exist after 200 response")
-	}
+	t.Fatalf("reservation %q still exists after %v", key, timeout)
 }
 
 func TestShadowModeForwardsWhenBudgetDenied(t *testing.T) {

@@ -22,85 +22,78 @@ type settlingReader struct {
 	underlying io.ReadCloser
 	buf        bytes.Buffer
 	extractor  usage.UsageExtractor
-	settler    BudgetSettler
-	requestID  string
-	reserved   int64
-	ctx        context.Context
-	logger     *slog.Logger
+	params     settlementParams
 	once       sync.Once
 }
 
 func newSettlingReader(
 	underlying io.ReadCloser,
 	extractor usage.UsageExtractor,
-	settler BudgetSettler,
-	ctx context.Context,
-	requestID string,
-	reserved int64,
-	logger *slog.Logger,
+	params settlementParams,
 ) io.ReadCloser {
-	if logger == nil {
-		logger = slog.Default()
+	if params.logger == nil {
+		params.logger = slog.Default()
 	}
 	return &settlingReader{
 		underlying: underlying,
 		extractor:  extractor,
-		settler:    settler,
-		ctx:        ctx,
-		requestID:  requestID,
-		reserved:   reserved,
-		logger:     logger,
+		params:     params,
 	}
 }
 
 func (r *settlingReader) Read(p []byte) (int, error) {
+	if err := r.params.ctx.Err(); err != nil {
+		r.finalize("disconnected", r.params.reserved, false)
+		return 0, err
+	}
+
 	n, err := r.underlying.Read(p)
 	if n > 0 {
 		_, _ = r.buf.Write(p[:n])
 	}
 	if err == io.EOF {
-		r.settle()
+		r.finalizeFromBody()
 	}
 	return n, err
 }
 
 func (r *settlingReader) Close() error {
 	err := r.underlying.Close()
-	r.settle()
+	r.finalizeFromBody()
 	return err
 }
 
-func (r *settlingReader) settle() {
+func (r *settlingReader) finalizeFromBody() {
+	if r.extractor == nil {
+		return
+	}
+
+	u, err := r.extractor.ExtractFromJSON(r.buf.Bytes())
+	if err != nil {
+		r.params.logger.Warn("failed to extract usage from non-streaming response",
+			"request_id", r.params.requestID,
+			"error", err,
+		)
+		r.finalize("missing_usage", r.params.reserved, true)
+		return
+	}
+	r.finalize("settled", u.Total(), false)
+}
+
+func (r *settlingReader) finalize(outcome string, actual int64, countMissing bool) {
 	r.once.Do(func() {
-		if r.settler == nil || r.extractor == nil || r.requestID == "" {
-			return
+		if countMissing && r.params.metrics != nil {
+			r.params.metrics.IncMissingUsage()
 		}
-
-		u, err := r.extractor.ExtractFromJSON(r.buf.Bytes())
-		if err != nil {
-			r.logger.Warn("failed to extract usage from non-streaming response",
-				"request_id", r.requestID,
-				"error", err,
-			)
-			return
-		}
-
-		actual := u.Total()
-		if err := r.settler.Settle(r.ctx, r.requestID, actual); err != nil {
-			r.logger.Error("failed to settle budget",
-				"request_id", r.requestID,
-				"reserved", r.reserved,
-				"actual", actual,
-				"error", err,
-			)
-			return
-		}
-
-		r.logger.Info("budget settled",
-			"request_id", r.requestID,
-			"reserved", r.reserved,
-			"actual", actual,
-			"outcome", "settled",
+		settleWithRetrySync(
+			context.WithoutCancel(r.params.ctx),
+			r.params.settler,
+			r.params.metrics,
+			r.params.requestID,
+			actual,
+			r.params.reserved,
+			outcome,
+			r.params.logger,
 		)
 	})
 }

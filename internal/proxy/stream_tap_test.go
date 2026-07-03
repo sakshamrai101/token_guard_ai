@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/saksham/token-guard-ai/internal/budget"
 	"github.com/saksham/token-guard-ai/internal/usage"
 )
 
@@ -57,11 +58,7 @@ func TestStreamTapForwardsBytesAndSettlesAsync(t *testing.T) {
 	tap := newStreamTap(
 		io.NopCloser(strings.NewReader(stream)),
 		usage.NewOpenAIStreamExtractor(),
-		settler,
-		context.Background(),
-		"req-stream",
-		100,
-		nil,
+		testParams(context.Background(), settler, "req-stream", 100),
 	)
 
 	got, err := io.ReadAll(tap)
@@ -87,11 +84,7 @@ func TestStreamTapSettlesOnce(t *testing.T) {
 	tap := newStreamTap(
 		io.NopCloser(strings.NewReader(stream)),
 		usage.NewOpenAIStreamExtractor(),
-		settler,
-		context.Background(),
-		"req-once",
-		50,
-		nil,
+		testParams(context.Background(), settler, "req-once", 50),
 	)
 
 	_, _ = io.ReadAll(tap)
@@ -112,11 +105,7 @@ func TestStreamTapPartialReads(t *testing.T) {
 	tap := newStreamTap(
 		pr,
 		usage.NewOpenAIStreamExtractor(),
-		settler,
-		context.Background(),
-		"req-partial",
-		50,
-		nil,
+		testParams(context.Background(), settler, "req-partial", 50),
 	)
 
 	go func() {
@@ -134,25 +123,56 @@ func TestStreamTapPartialReads(t *testing.T) {
 	}
 }
 
-func TestStreamTapNoSettleWithoutUsage(t *testing.T) {
+func TestStreamTapSettlesAtReservedWhenUsageMissing(t *testing.T) {
 	stream := "data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\ndata: [DONE]\n\n"
 	settler := newAsyncStubSettler()
+	metrics := &budget.Metrics{}
 	tap := newStreamTap(
 		io.NopCloser(strings.NewReader(stream)),
 		usage.NewOpenAIStreamExtractor(),
-		settler,
-		context.Background(),
-		"req-nousage",
-		50,
-		nil,
+		settlementParams{
+			settler:   settler,
+			metrics:   metrics,
+			ctx:       context.Background(),
+			requestID: "req-nousage",
+			reserved:  50,
+		},
 	)
 
 	_, _ = io.ReadAll(tap)
 	_ = tap.Close()
 
-	select {
-	case <-settler.done:
-		t.Fatal("expected no settle without usage")
-	case <-time.After(100 * time.Millisecond):
+	call := settler.waitSettle(t, time.Second)
+	if call.actual != 50 {
+		t.Fatalf("actual = %d, want reserved 50", call.actual)
+	}
+	if metrics.MissingUsage.Load() != 1 {
+		t.Fatalf("missing_usage = %d, want 1", metrics.MissingUsage.Load())
+	}
+}
+
+func TestStreamTapSettlesAtReservedOnDisconnect(t *testing.T) {
+	settler := newAsyncStubSettler()
+	ctx, cancel := context.WithCancel(context.Background())
+	pr, pw := io.Pipe()
+
+	tap := newStreamTap(
+		pr,
+		usage.NewOpenAIStreamExtractor(),
+		testParams(ctx, settler, "req-sdisc", 300),
+	)
+
+	go func() {
+		_, _ = pw.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n"))
+		cancel()
+		_ = pw.Close()
+	}()
+
+	_, _ = io.ReadAll(tap)
+	_ = tap.Close()
+
+	call := settler.waitSettle(t, time.Second)
+	if call.actual != 300 {
+		t.Fatalf("actual = %d, want reserved 300", call.actual)
 	}
 }

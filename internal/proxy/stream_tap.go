@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	"context"
 	"io"
 	"log/slog"
 	"sync"
@@ -11,58 +10,51 @@ import (
 )
 
 type streamTap struct {
-	underlying   io.ReadCloser
-	parser       *sse.Parser
-	streamExt    usage.StreamExtractor
-	settler      BudgetSettler
-	requestID    string
-	reserved     int64
-	ctx          context.Context
-	logger       *slog.Logger
-	once         sync.Once
-	lastUsage    usage.Usage
-	hasUsage     bool
-	sawDone      bool
+	underlying io.ReadCloser
+	parser     *sse.Parser
+	streamExt  usage.StreamExtractor
+	params     settlementParams
+	once       sync.Once
+	lastUsage  usage.Usage
+	hasUsage   bool
+	sawDone    bool
 }
 
 func newStreamTap(
 	underlying io.ReadCloser,
 	streamExt usage.StreamExtractor,
-	settler BudgetSettler,
-	ctx context.Context,
-	requestID string,
-	reserved int64,
-	logger *slog.Logger,
+	params settlementParams,
 ) io.ReadCloser {
-	if logger == nil {
-		logger = slog.Default()
+	if params.logger == nil {
+		params.logger = slog.Default()
 	}
 	return &streamTap{
 		underlying: underlying,
 		parser:     sse.NewParser(),
 		streamExt:  streamExt,
-		settler:    settler,
-		ctx:        ctx,
-		requestID:  requestID,
-		reserved:   reserved,
-		logger:     logger,
+		params:     params,
 	}
 }
 
 func (t *streamTap) Read(p []byte) (int, error) {
+	if err := t.params.ctx.Err(); err != nil {
+		t.triggerSettle("disconnected", t.params.reserved)
+		return 0, err
+	}
+
 	n, err := t.underlying.Read(p)
 	if n > 0 {
 		t.processEvents(t.parser.Feed(p[:n]))
 	}
 	if err == io.EOF {
-		t.finish()
+		t.finishAfterStream()
 	}
 	return n, err
 }
 
 func (t *streamTap) Close() error {
 	err := t.underlying.Close()
-	t.finish()
+	t.finishAfterStream()
 	return err
 }
 
@@ -79,17 +71,39 @@ func (t *streamTap) processEvents(events []sse.Event) {
 	}
 }
 
-func (t *streamTap) finish() {
+func (t *streamTap) finishAfterStream() {
 	t.once.Do(func() {
 		t.processEvents(t.parser.Flush())
-		if !t.hasUsage {
-			t.logger.Warn("stream ended without usage metadata",
-				"request_id", t.requestID,
-				"saw_done", t.sawDone,
-			)
+		if t.hasUsage {
+			t.runSettle("settled", t.lastUsage.Total())
 			return
 		}
-		settleCtx := context.WithoutCancel(t.ctx)
-		settleWithRetry(settleCtx, t.settler, t.requestID, t.lastUsage.Total(), t.reserved, t.logger)
+		if t.params.metrics != nil {
+			t.params.metrics.IncMissingUsage()
+		}
+		t.params.logger.Warn("stream ended without usage metadata",
+			"request_id", t.params.requestID,
+			"saw_done", t.sawDone,
+		)
+		t.runSettle("missing_usage", t.params.reserved)
 	})
+}
+
+func (t *streamTap) triggerSettle(outcome string, actual int64) {
+	t.once.Do(func() {
+		t.runSettle(outcome, actual)
+	})
+}
+
+func (t *streamTap) runSettle(outcome string, actual int64) {
+	settleWithRetryAsync(
+		t.params.ctx,
+		t.params.settler,
+		t.params.metrics,
+		t.params.requestID,
+		actual,
+		t.params.reserved,
+		outcome,
+		t.params.logger,
+	)
 }

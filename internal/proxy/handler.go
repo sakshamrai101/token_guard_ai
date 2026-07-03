@@ -181,21 +181,27 @@ func (h *Handler) modifyResponse(resp *http.Response) error {
 			resp.Body = newStreamTap(
 				resp.Body,
 				h.streamExt,
-				h.settler,
-				resp.Request.Context(),
-				requestID,
-				reserved,
-				h.logger,
+				settlementParams{
+					settler:   h.settler,
+					metrics:   h.metrics,
+					ctx:       resp.Request.Context(),
+					requestID: requestID,
+					reserved:  reserved,
+					logger:    h.logger,
+				},
 			)
 		} else if h.extractor != nil && !isEventStream(resp.Header) {
 			resp.Body = newSettlingReader(
 				resp.Body,
 				h.extractor,
-				h.settler,
-				resp.Request.Context(),
-				requestID,
-				reserved,
-				h.logger,
+				settlementParams{
+					settler:   h.settler,
+					metrics:   h.metrics,
+					ctx:       resp.Request.Context(),
+					requestID: requestID,
+					reserved:  reserved,
+					logger:    h.logger,
+				},
 			)
 		}
 	}

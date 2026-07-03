@@ -198,3 +198,47 @@ Do NOT implement all phases in one changeset.
 - No new external dependencies beyond what is already in go.mod unless strictly necessary.
 - Comments only for non-obvious logic (sync.Once settle guard, partial SSE line buffering).
 - Minimize handler.go growth — extract body wraps to separate files.
+
+---
+
+## Post-MVP Launch Scope (v1 Self-Hosted)
+
+### GTM & Storage (locked)
+
+- Self-hosted only for v1. No user database. Redis only for budget state.
+- One `UPSTREAM_URL` per proxy instance (OpenAI OR Anthropic).
+
+### Build Order (strict — one phase per changeset)
+
+1. **Launch-1a:** Anthropic JSON extractor + estimate + integration test
+2. **Launch-1b:** Anthropic SSE extractor + integration test
+3. **Launch-2a:** Admin API + set_budget.lua + tests
+4. **Launch-2b:** Docker Compose + Dockerfile + .env.example
+5. **Launch-3:** README, RUNBOOK, ONBOARDING, LICENSE
+
+Run `go test ./...` after each phase. Do NOT combine Launch-1 and Launch-2.
+
+### Anthropic Usage
+
+- Non-streaming: actual = usage.input_tokens + usage.output_tokens
+- Streaming: parse message_stop (preferred) or accumulate message_delta
+- Reuse sse/parser.go; add anthropic_stream.go
+
+### Admin API
+
+- Routes under /admin/v1/buckets/{id} — NOT proxied upstream
+- Auth: Bearer ADMIN_API_KEY (required)
+- Use set_budget.lua for PUT/topup (Lua-only Redis mutations)
+- Rate-limit admin endpoints
+
+### TDD & Quality
+
+- Write failing tests first for each extractor and admin handler
+- All existing tests MUST pass — no regressions
+- Match existing code style; new packages: internal/admin, extend internal/usage
+- No Postgres, no user auth, no billing, no dashboard in this scope
+
+### Documentation
+
+- Update README when Launch-2b ships
+- ONBOARDING.md = client setup; docs/RUNBOOK.md = ops

@@ -41,8 +41,9 @@ func main() {
 		checker = proxy.NewBudgetCheckerBridge(budgetChecker)
 		releaser = redisClient
 		settler = redisClient
-		extractor = usage.NewOpenAIExtractor()
-		streamExt = usage.NewOpenAIStreamExtractor()
+		providers := usage.RegistryForHost(cfg.UpstreamHost)
+		extractor = providers.JSON
+		streamExt = providers.Stream
 		readiness = budget.NewReadiness(redisClient)
 	}
 

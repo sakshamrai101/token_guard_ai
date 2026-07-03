@@ -13,7 +13,7 @@ type EstimateConfig struct {
 }
 
 type chatCompletionRequest struct {
-	MaxTokens *int64 `json:"max_tokens"`
+	MaxTokens *int64 `json:"max_tokens"` // OpenAI chat completions and Anthropic Messages API
 }
 
 func EstimateFromBody(body []byte, cfg EstimateConfig, logger *slog.Logger) int64 {

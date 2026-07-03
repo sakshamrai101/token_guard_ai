@@ -547,3 +547,129 @@ Do NOT start Phase B until Phase A tests pass. Do NOT start Phase C until Phase 
 - [ ] E2E concurrent overspend test with real usage
 - [ ] Goroutine leak test (1000 aborted streams)
 - [ ] All Day 1 + Day 2 tests still pass
+
+---
+
+## 13. Post-MVP Launch Architecture
+
+### 13.1 Self-Hosted Deployment Model
+
+```text
+Client App  →  [Client Gateway]  →  Token Guard Proxy  →  OpenAI / Anthropic
+                    │                      │
+                    │ injects              │ reads/writes
+                    ▼                      ▼
+            X-Budget-Bucket-Id       Redis (budget:{id})
+            X-Request-Id             Admin API (ops only)
+            Authorization (passthrough)
+```
+
+- Token Guard does **not** store provider API keys — they pass through.
+- Token Guard does **not** require a user database for v1 — buckets are string IDs in Redis.
+- One proxy deployment = one `UPSTREAM_URL` (OpenAI **or** Anthropic). Clients run two instances if they need both.
+
+### 13.2 Multi-Provider Extractor Routing
+
+```go
+// Select by UPSTREAM_HOST or PROVIDER env
+type ProviderRegistry struct {
+    JSON   usage.UsageExtractor
+    Stream usage.StreamExtractor
+}
+
+func RegistryForHost(host string) ProviderRegistry {
+    switch host {
+    case "api.anthropic.com":
+        return ProviderRegistry{usage.NewAnthropicExtractor(), usage.NewAnthropicStreamExtractor()}
+    default:
+        return ProviderRegistry{usage.NewOpenAIExtractor(), usage.NewOpenAIStreamExtractor()}
+    }
+}
+```
+
+Wire in `main.go` from `cfg.UpstreamHost`.
+
+### 13.3 Anthropic Response Formats
+
+**Non-streaming (Messages API):**
+```json
+{
+  "content": [{"type": "text", "text": "Hello"}],
+  "usage": {"input_tokens": 10, "output_tokens": 20}
+}
+```
+`actual = input_tokens + output_tokens`
+
+**Streaming (SSE):**
+```
+event: message_start
+data: {"type":"message_start","message":{"usage":{"input_tokens":10,...}}}
+
+event: message_delta
+data: {"type":"message_delta","usage":{"output_tokens":5}}
+
+event: message_stop
+data: {"type":"message_stop","message":{"usage":{"input_tokens":10,"output_tokens":20}}}
+```
+Prefer final usage from `message_stop`; accumulate `message_delta` output_tokens if needed.
+
+### 13.4 Admin API Specification
+
+| Method | Path | Auth | Body | Response |
+|--------|------|------|------|----------|
+| GET | `/admin/v1/buckets/{id}` | Bearer `ADMIN_API_KEY` | — | `{"bucket_id","balance"}` |
+| PUT | `/admin/v1/buckets/{id}` | Bearer `ADMIN_API_KEY` | `{"balance": int}` | `{"bucket_id","balance"}` |
+| POST | `/admin/v1/buckets/{id}/topup` | Bearer `ADMIN_API_KEY` | `{"amount": int}` | `{"bucket_id","balance"}` |
+
+Implementation notes:
+- Package: `internal/admin/handler.go` + `internal/admin/store.go` (Redis GET/SET on `budget:{id}`)
+- Use plain Redis GET/SET for admin reads/writes is acceptable **only** in admin package for balance seeding — OR add `set_budget.lua` for atomic set. Prefer Lua if concurrent with reserve/settle.
+- Register routes on `Server` mux before `/` catch-all
+- Return 401 if `ADMIN_API_KEY` unset or token mismatch
+- Do NOT expose admin routes on the upstream director path
+
+**Recommended: `set_budget.lua`** — atomic SET balance (admin override). Keeps all Redis mutations in Lua per engineering standards.
+
+### 13.5 Docker Compose Layout
+
+```
+docker-compose.yml
+Dockerfile
+.env.example
+```
+
+```yaml
+services:
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+  proxy:
+    build: .
+    ports: ["8080:8080"]
+    environment:
+      ENFORCEMENT_MODE: shadow
+      REDIS_URL: redis://redis:6379
+      ADMIN_API_KEY: ${ADMIN_API_KEY}
+    depends_on: [redis]
+```
+
+### 13.6 Launch Build Order
+
+| Phase | Scope | Gate |
+|-------|-------|------|
+| Launch-1a | Anthropic JSON extractor + estimate + integration test | `go test ./...` |
+| Launch-1b | Anthropic SSE extractor + integration test | `go test ./...` |
+| Launch-2a | Admin API + `set_budget.lua` + tests | `go test ./...` |
+| Launch-2b | Docker Compose + Dockerfile + `.env.example` | manual smoke test |
+| Launch-3 | README, RUNBOOK, ONBOARDING, license | review checklist |
+
+Do NOT combine Launch-1 and Launch-2 in one changeset.
+
+### 13.7 v1 Launch Definition of Done
+
+- [ ] Anthropic stream + non-stream settlement works
+- [ ] Provider routing by upstream host
+- [ ] Admin API authenticated and tested
+- [ ] Docker Compose documented and working
+- [ ] ONBOARDING.md + RUNBOOK.md complete
+- [ ] All existing tests pass

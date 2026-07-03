@@ -188,6 +188,7 @@ func TestEstimateFromBody(t *testing.T) {
 		want int64
 	}{
 		{"max_tokens present", `{"model":"gpt-4o","max_tokens":1024}`, 1536},
+		{"anthropic messages max_tokens", `{"model":"claude-3-5-sonnet-20241022","max_tokens":1024,"messages":[{"role":"user","content":"hi"}]}`, 1536},
 		{"missing max_tokens", `{"model":"gpt-4o"}`, 4096},
 		{"invalid json", `{bad`, 4096},
 		{"empty body", ``, 4096},

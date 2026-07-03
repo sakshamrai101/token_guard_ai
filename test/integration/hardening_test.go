@@ -230,6 +230,8 @@ func TestGoroutineLeakOnAbortedStreams(t *testing.T) {
 	if metrics.SettleSuccess.Load() < 900 {
 		t.Fatalf("settle success = %d, want at least 900", metrics.SettleSuccess.Load())
 	}
+	// Async settle retries run up to ~300ms; let stragglers finish before closing Redis.
+	time.Sleep(400 * time.Millisecond)
 
 	// Release miniredis connection-handler goroutines before counting; pool growth is
 	// test infrastructure noise, not proxy leaks.

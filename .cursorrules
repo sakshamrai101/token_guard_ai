@@ -152,3 +152,49 @@ Structured JSON log per request: `{request_id, bucket_id, reserved, actual, mode
 - Empty `X-Budget-Bucket-Id`: fail-open in shadow/enforce (cannot enforce without bucket).
 - Request body must be read-and-restored so upstream receives full payload after estimate parse.
 - Implement `release_budget` Lua script in addition to reserve/settle.
+
+---
+
+## Day 3 Scope (Usage Extraction & Hardening)
+
+### Build Order (strict — one phase per PR/commit)
+
+1. **Phase A:** non-streaming JSON settle only
+2. **Phase B:** SSE streaming settle only (after Phase A tests pass)
+3. **Phase C:** disconnect, missing usage, retry, E2E, goroutine test (after Phase B tests pass)
+
+Do NOT implement all phases in one changeset.
+
+### TDD Requirements
+
+- Write failing unit test first for each new function (extractor, parser, body wrap).
+- Run `go test ./...` after each phase before proceeding.
+- All existing Day 1 + Day 2 tests MUST continue to pass — never delete or weaken them.
+
+### Provider Scope
+
+- OpenAI only for Day 3. Do NOT implement Anthropic extractors.
+- `actual = usage.total_tokens` (raw token count).
+
+### Settlement Wiring
+
+- Add `BudgetSettler` interface; implement via existing `*budget.Client.Settle`.
+- Store `reserved` amount in request context after pre-check (for disconnect/missing-usage fallback).
+- Non-streaming: sync `Settle` on body `Close()`.
+- Streaming: async `go Settle(...)` after final chunk; use `sync.Once` to prevent double-settle.
+- Do NOT change Lua scripts.
+
+### Stream Constraints
+
+- MUST NOT buffer full SSE response body.
+- SSE parser MUST handle partial lines across `Read()` calls.
+- On missing usage or client disconnect: `Settle(requestID, reserved)`.
+- Settlement retry: 3x backoff; log error if all fail (TTL is safety net).
+
+### Code Quality
+
+- Match existing package layout and naming in `internal/budget` and `internal/proxy`.
+- Keep files focused: one body wrap per file (`settling_reader.go`, `stream_tap.go`).
+- No new external dependencies beyond what is already in go.mod unless strictly necessary.
+- Comments only for non-obvious logic (sync.Once settle guard, partial SSE line buffering).
+- Minimize handler.go growth — extract body wraps to separate files.

@@ -374,3 +374,176 @@ On upstream 200, the reservation remains in Redis until:
 - [ ] `/readyz` returns 503 when Redis unreachable
 - [ ] Slack/log alert on fail-open and budget denied
 - [ ] Integration tests for 429 and fail-open paths
+
+---
+
+## 12. Day 3 Implementation Guide
+
+This section maps Usage Extraction & Hardening onto the Day 2 codebase on branch `redis-engine`.
+
+### 12.1 What Day 2 Already Provides
+
+| Component | Location | Day 3 action |
+|-----------|----------|--------------|
+| `Client.Settle()` | `internal/budget/settlement.go` | Wire via `BudgetSettler` interface |
+| `settle_budget.lua` | `internal/budget/lua/` | No changes — tested in miniredis |
+| `BudgetReleaser` | `internal/proxy/handler.go` | Add parallel `BudgetSettler` |
+| `modifyResponse` early return on 200 | `handler.go:152` | Replace with body wrap logic |
+| `requestIDContextKey` | `handler.go` | Add `reservedContextKey` for fallback settle |
+| `result.Reserved` from pre-check | `ServeHTTP` log | Store in context for disconnect fallback |
+| Idempotency on `request_id` | Lua scripts | Reused by settle — no changes |
+| `RESERVATION_TTL` | config + Lua | Safety net if settle fails |
+
+### 12.2 Settlement Flow (Day 3 Target)
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Handler
+    participant BodyWrap
+    participant Usage
+    participant Redis
+    participant Provider
+
+    Client->>Handler: POST (pre-check already reserved)
+    Handler->>Provider: forward
+    Provider-->>BodyWrap: 200 response body
+  loop each Read chunk
+        BodyWrap-->>Client: forward bytes
+        BodyWrap->>Usage: feed parser
+    end
+    alt non-streaming
+        BodyWrap->>Usage: ExtractFromJSON
+        Usage-->>BodyWrap: total_tokens=230
+        BodyWrap->>Redis: Settle sync
+    else streaming
+        BodyWrap->>Usage: usage in final SSE chunk
+        Usage-->>BodyWrap: total_tokens=230
+        BodyWrap->>Redis: Settle async goroutine
+    else disconnect before usage
+        BodyWrap->>Redis: Settle reserved amount
+    else missing usage
+        BodyWrap->>Redis: Settle reserved amount
+    end
+```
+
+### 12.3 Package Layout
+
+```
+internal/usage/
+  usage.go            # Usage struct, Total()
+  extractor.go        # UsageExtractor interface
+  openai.go           # ExtractFromJSON
+  openai_stream.go    # OpenAI SSE usage extraction (Phase B)
+  sse/
+    parser.go         # SSE frame state machine (Phase B)
+  testdata/
+    openai_completion.json
+    openai_stream.sse
+  *_test.go
+
+internal/proxy/
+  settler.go          # BudgetSettler interface (optional separate file)
+  settling_reader.go  # non-streaming body wrap (Phase A)
+  stream_tap.go       # streaming body wrap (Phase B)
+```
+
+### 12.4 Context Keys
+
+Pass through `resp.Request.Context()` (already carries `request_id`):
+
+```go
+type ctxKey string
+const (
+    requestIDContextKey ctxKey = "request_id"
+    reservedContextKey  ctxKey = "reserved"   // int64 from pre-check
+)
+```
+
+Set both in `ServeHTTP` after successful pre-check:
+
+```go
+ctx = context.WithValue(ctx, requestIDContextKey, requestID)
+ctx = context.WithValue(ctx, reservedContextKey, result.Reserved)
+```
+
+### 12.5 Non-Streaming Body Wrap (Phase A)
+
+`settlingReader` implements `io.ReadCloser`:
+
+- `Read(p []byte)`: delegate to upstream `resp.Body` (client receives bytes immediately)
+- Accumulate bytes in a small buffer OR re-read on close (prefer tee into `bytes.Buffer` only for non-streaming — acceptable per ARCHITECTURE: sync settle, no stream latency concern)
+- `Close()`:
+  1. Parse accumulated body with `extractor.ExtractFromJSON`
+  2. `settler.Settle(ctx, requestID, usage.Total())`
+  3. Close underlying body
+  4. Log `{request_id, reserved, actual, outcome: "settled"}`
+
+Detect non-streaming: `Content-Type` does NOT contain `text/event-stream`.
+
+### 12.6 Streaming Body Wrap (Phase B)
+
+`streamTap` implements `io.ReadCloser`:
+
+- `Read(p []byte)`: read from upstream, forward same bytes (no buffering of full body)
+- Feed each line to `sse.Parser` as lines complete (handle partial lines across reads)
+- On `data: [DONE]` or EOF:
+  - If usage found → `go settler.Settle(...)` with retry wrapper
+  - If usage missing → `go settler.Settle(ctx, requestID, reserved)` + `usage_missing_total`
+
+**Goroutine safety:** one settle goroutine per request; use `sync.Once` to prevent double-settle on EOF + Close.
+
+### 12.7 Settlement Retry Wrapper
+
+```go
+func settleWithRetry(ctx context.Context, settler BudgetSettler, requestID string, actual int64, logger *slog.Logger) {
+    for attempt := 0; attempt < 3; attempt++ {
+        if err := settler.Settle(ctx, requestID, actual); err == nil {
+            return
+        }
+        time.Sleep(time.Duration(attempt+1) * 50 * time.Millisecond)
+    }
+    logger.Error("settle failed after retries", "request_id", requestID)
+    // reservation TTL will auto-release
+}
+```
+
+### 12.8 OpenAI Response Formats
+
+**Non-streaming:**
+```json
+{
+  "choices": [{"message": {"content": "Hello"}}],
+  "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
+}
+```
+
+**Streaming (final chunk before `[DONE]`):**
+```
+data: {"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30}}
+data: [DONE]
+```
+
+`actual` for settle = `usage.total_tokens`.
+
+### 12.9 Phase Boundaries (Incremental Delivery)
+
+| Phase | Ship when | Verify before next phase |
+|-------|-----------|--------------------------|
+| A | Non-streaming settle works | `go test ./...` green; integration settle test passes |
+| B | Streaming settle works | SSE fixture tests pass; stream integration test passes |
+| C | Hardening complete | E2E concurrent test + goroutine test pass |
+
+Do NOT start Phase B until Phase A tests pass. Do NOT start Phase C until Phase B tests pass.
+
+### 12.10 Day 3 Definition of Done
+
+- [ ] `BudgetSettler` wired; `modifyResponse` wraps 200 bodies
+- [ ] Non-streaming: balance reconciled to actual usage after response
+- [ ] Streaming: async settle after final SSE chunk; no full-body buffer
+- [ ] Disconnect → settle at reserved
+- [ ] Missing usage → settle at reserved + metric
+- [ ] Settlement retry (3×)
+- [ ] E2E concurrent overspend test with real usage
+- [ ] Goroutine leak test (1000 aborted streams)
+- [ ] All Day 1 + Day 2 tests still pass

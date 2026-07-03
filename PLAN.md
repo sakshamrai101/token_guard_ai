@@ -23,8 +23,8 @@ For engineering constraints and standards, see [.cursorrules](.cursorrules). For
 ### 2. Budget Buckets
 
 - Bucket identity from trusted header `X-Budget-Bucket-Id` (MVP: trusted network / gateway injects it)
-- Budget unit: **USD micro-cents** (integer) OR **token count** — pick at implementation start; store as integer in Redis
-- Per-bucket configurable `reservation_estimate` (default from model + `max_tokens` in request body, or static fallback)
+- Budget unit: **raw token count** (integer in Redis; 1:1 with provider `usage.total_tokens`)
+- Per-bucket configurable `reservation_estimate` (parsed from `max_tokens` in request body + buffer, or static fallback)
 
 ### 3. Circuit Breaker (Pre-Request)
 
@@ -135,13 +135,84 @@ For engineering constraints and standards, see [.cursorrules](.cursorrules). For
 
 ### Day 3 — Usage Extraction & Hardening
 
-- SSE parser with OpenAI usage extractor
-- Anthropic usage extractor (basic)
-- Non-streaming JSON usage settlement
-- Client-disconnect settlement
-- Idempotency via `X-Request-Id`
-- Reservation TTL + expiry cleanup
-- End-to-end test: N concurrent requests cannot overspend bucket
+**Decisions (locked):**
+
+- Build order: **Phase A non-streaming JSON settle → Phase B SSE streaming → Phase C hardening**
+- Provider scope: **OpenAI only** (Anthropic extractor deferred; leave stub or TODO)
+- Settlement: `actual = usage.total_tokens` (raw token count, 1:1 with Redis budget unit)
+- Streaming settle: **async** (goroutine after final chunk); non-streaming settle: **sync** on body close
+- Missing usage / client disconnect: settle at **reserved** amount (worst-case)
+
+**Phase A — Non-streaming JSON settle (do first)**
+
+1. **`internal/usage` package**
+   - `Usage` struct: `{PromptTokens, CompletionTokens}` + `Total()` method
+   - `UsageExtractor` interface: `ExtractFromJSON(body []byte) (Usage, error)`
+   - `openai.go`: parse `usage` from OpenAI chat completion JSON response
+   - Unit tests with recorded JSON fixtures
+
+2. **`BudgetSettler` interface** in `internal/proxy` (mirror `BudgetReleaser`)
+   - `Settle(ctx, requestID, actual int64) error`
+   - Implemented by existing `*budget.Client`
+
+3. **Handler wiring**
+   - Store `request_id` + `reserved` amount in request context after pre-check
+   - In `modifyResponse` for `StatusCode == 200` and non-SSE `Content-Type`:
+     - Wrap `resp.Body` with `settlingReader` that forwards bytes to client
+     - On `Close()`/EOF: parse JSON → `ExtractFromJSON` → `Settle(requestID, total)`
+   - Wire settler + extractor in `main.go`
+
+4. **Tests (Phase A)**
+   - Unit: OpenAI JSON extractor fixtures
+   - Integration: mock upstream returns JSON with `usage` → Redis balance reconciled (not held)
+   - Integration: actual < reserved → balance refunded via `settle_budget` delta
+
+**Phase B — SSE streaming settle (do second)**
+
+1. **Extend `internal/usage`**
+   - `sse/parser.go`: SSE frame state machine (comments, blank lines, `data:` lines, `[DONE]`)
+   - `openai_stream.go`: detect `usage` in final `data:` chunk before `[DONE]`
+   - `ExtractFromSSE(reader io.Reader) (Usage, error)` or incremental `Feed(line string)`
+
+2. **Stream body tap** in `modifyResponse`
+   - When `Content-Type: text/event-stream`: wrap `resp.Body` with `streamTap`
+   - `Read()` forwards bytes to client AND feeds SSE parser line-by-line
+   - On EOF/`[DONE]`: extract usage → **async** `go settler.Settle(...)` (do not block client)
+   - MUST NOT buffer full response body
+
+3. **Tests (Phase B)**
+   - Unit: SSE parser with recorded OpenAI stream fixtures
+   - Integration: mock upstream SSE stream → balance settled to actual usage after stream ends
+
+**Phase C — Hardening (do third)**
+
+1. **Client disconnect**: watch `resp.Request.Context().Done()` in body wrapper; if canceled before usage → `Settle(requestID, reserved)`
+2. **Missing usage**: stream ends without `usage` chunk → `Settle(requestID, reserved)`; increment `usage_missing_total`
+3. **Settlement retry**: 3× backoff on Redis `Settle` error; rely on `RESERVATION_TTL` if all fail
+4. **Metrics**: add `budget_settle_total`, `usage_missing_total` to `budget/metrics.go`
+5. **Structured logs**: extend budget check log with `actual` and `outcome=settled|missing_usage|disconnected`
+6. **E2E test**: N concurrent non-streaming requests with known `usage` → final balance correct; request N+1 gets 429
+7. **Goroutine leak test**: 1000 aborted streaming requests → `runtime.NumGoroutine()` stable
+
+**Explicitly NOT Day 3:**
+
+- Anthropic SSE (`message_stop`) and JSON usage extractors
+- Anthropic `max_tokens` request-body parsing
+- gzip `Content-Encoding` decompress tap
+- Prometheus `/metrics` HTTP endpoint
+- Changes to Lua scripts (`settle_budget` already implemented)
+- USD micro-cents cost conversion
+
+**Day 3 Definition of Done:**
+
+- [ ] Non-streaming 200 responses settle budget to actual `usage.total_tokens`
+- [ ] Streaming 200 responses settle budget async after final SSE chunk
+- [ ] Client disconnect settles at reserved amount
+- [ ] Missing usage settles at reserved amount
+- [ ] Settlement retry on Redis error (3× backoff)
+- [ ] E2E: concurrent requests cannot overspend bucket with real usage settlement
+- [ ] No goroutine leaks on 1000 aborted streams
+- [ ] All existing Day 1/Day 2 tests still pass
 
 ---
 
@@ -153,14 +224,17 @@ For engineering constraints and standards, see [.cursorrules](.cursorrules). For
 | Bucket identity | `X-Budget-Bucket-Id` header | Gateway-injected; already in Day 1 scaffold |
 | Reservation estimate | Parse `max_tokens` from request JSON | Fallback to `DEFAULT_RESERVATION_ESTIMATE` (4096) |
 | Day 2 settlement | Reserve + release on errors only | 200 responses hold until TTL; Day 3 settles with real usage |
+| Day 3 build order | Non-streaming → streaming → hardening | Incremental phases; TDD per phase |
+| Day 3 provider scope | OpenAI only | Anthropic deferred post-MVP |
 
 ---
 
 ## Definition of Done (MVP)
 
-- [ ] Proxy forwards OpenAI + Anthropic chat requests transparently (stream + non-stream)
-- [ ] Concurrent requests respect budget via reservation (demonstrated by test)
-- [ ] Redis outage → requests still forwarded (fail-open) with alert fired
-- [ ] Budget exhausted → 429 without upstream call
-- [ ] Usage settlement adjusts balance within 1s of stream completion (p99)
-- [ ] No goroutine leaks on 1000 aborted streams (load test)
+- [x] Proxy forwards OpenAI chat requests transparently (stream + non-stream) — Day 1
+- [x] Concurrent requests respect budget via reservation — Day 2 miniredis test
+- [x] Redis outage → requests still forwarded (fail-open) with alert fired — Day 2
+- [x] Budget exhausted → 429 without upstream call — Day 2
+- [ ] Usage settlement adjusts balance within 1s of stream completion (p99) — Day 3 Phase B
+- [ ] No goroutine leaks on 1000 aborted streams (load test) — Day 3 Phase C
+- [ ] E2E concurrent overspend prevention with real usage settlement — Day 3 Phase C

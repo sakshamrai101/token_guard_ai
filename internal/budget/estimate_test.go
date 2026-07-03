@@ -58,6 +58,9 @@ func TestMetricsCounters(t *testing.T) {
 	m.IncAllowed()
 	m.IncDenied()
 	m.IncFailOpen()
+	m.IncSettleSuccess()
+	m.IncSettleRetry()
+	m.IncMissingUsage()
 	m.RecordReserve(2 * time.Millisecond)
 	m.RecordReserve(4 * time.Millisecond)
 
@@ -69,6 +72,15 @@ func TestMetricsCounters(t *testing.T) {
 	}
 	if m.FailOpenTotal.Load() != 1 || m.BudgetCheckFailOpen.Load() != 1 {
 		t.Fatalf("fail_open counters = %d/%d, want 1/1", m.FailOpenTotal.Load(), m.BudgetCheckFailOpen.Load())
+	}
+	if m.SettleSuccess.Load() != 1 {
+		t.Fatalf("settle success = %d, want 1", m.SettleSuccess.Load())
+	}
+	if m.SettleRetry.Load() != 1 {
+		t.Fatalf("settle retry = %d, want 1", m.SettleRetry.Load())
+	}
+	if m.MissingUsage.Load() != 1 {
+		t.Fatalf("missing usage = %d, want 1", m.MissingUsage.Load())
 	}
 	if avg := m.ReserveAvgMs(); avg <= 0 {
 		t.Fatalf("ReserveAvgMs = %f, want > 0", avg)

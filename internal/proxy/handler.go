@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/saksham/token-guard-ai/internal/budget"
 	"github.com/saksham/token-guard-ai/internal/config"
+	"github.com/saksham/token-guard-ai/internal/usage"
 )
 
 type ctxKey string
@@ -27,6 +28,9 @@ type Handler struct {
 	proxy         *httputil.ReverseProxy
 	enforcement   *Enforcement
 	releaser      BudgetReleaser
+	settler       BudgetSettler
+	extractor     usage.UsageExtractor
+	streamExt     usage.StreamExtractor
 	estimateCfg   budget.EstimateConfig
 	metrics       *budget.Metrics
 	alerter       *budget.Alerter
@@ -40,6 +44,9 @@ func NewHandler(
 	transport *http.Transport,
 	enforcement *Enforcement,
 	releaser BudgetReleaser,
+	settler BudgetSettler,
+	extractor usage.UsageExtractor,
+	streamExt usage.StreamExtractor,
 	metrics *budget.Metrics,
 	alerter *budget.Alerter,
 	logger *slog.Logger,
@@ -62,6 +69,9 @@ func NewHandler(
 		cfg:          cfg,
 		enforcement:  enforcement,
 		releaser:     releaser,
+		settler:      settler,
+		extractor:    extractor,
+		streamExt:    streamExt,
 		estimateCfg: budget.EstimateConfig{
 			DefaultEstimate: cfg.DefaultReservationEst,
 			PromptBuffer:    cfg.PromptTokenBuffer,
@@ -143,28 +153,59 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := context.WithValue(r.Context(), requestIDContextKey, requestID)
+	ctx = context.WithValue(ctx, reservedContextKey, result.Reserved)
 	h.proxy.ServeHTTP(w, r.WithContext(ctx))
 }
 
 func (h *Handler) modifyResponse(resp *http.Response) error {
 	SanitizeResponseHeaders(resp.Header)
 
-	if resp.StatusCode < 400 || h.releaser == nil {
-		return nil
-	}
-
 	requestID, _ := resp.Request.Context().Value(requestIDContextKey).(string)
-	if requestID == "" {
+
+	if resp.StatusCode >= 400 {
+		if h.releaser != nil && requestID != "" {
+			if err := h.releaser.Release(resp.Request.Context(), requestID); err != nil {
+				h.logger.Error("failed to release budget on upstream error",
+					"request_id", requestID,
+					"status", resp.StatusCode,
+					"error", err,
+				)
+			}
+		}
 		return nil
 	}
 
-	if err := h.releaser.Release(resp.Request.Context(), requestID); err != nil {
-		h.logger.Error("failed to release budget on upstream error",
-			"request_id", requestID,
-			"status", resp.StatusCode,
-			"error", err,
-		)
+	if resp.StatusCode == 200 && h.settler != nil && requestID != "" {
+		reserved, _ := resp.Request.Context().Value(reservedContextKey).(int64)
+		if isEventStream(resp.Header) && h.streamExt != nil {
+			resp.Body = newStreamTap(
+				resp.Body,
+				h.streamExt,
+				settlementParams{
+					settler:   h.settler,
+					metrics:   h.metrics,
+					ctx:       resp.Request.Context(),
+					requestID: requestID,
+					reserved:  reserved,
+					logger:    h.logger,
+				},
+			)
+		} else if h.extractor != nil && !isEventStream(resp.Header) {
+			resp.Body = newSettlingReader(
+				resp.Body,
+				h.extractor,
+				settlementParams{
+					settler:   h.settler,
+					metrics:   h.metrics,
+					ctx:       resp.Request.Context(),
+					requestID: requestID,
+					reserved:  reserved,
+					logger:    h.logger,
+				},
+			)
+		}
 	}
+
 	return nil
 }
 

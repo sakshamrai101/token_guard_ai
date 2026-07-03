@@ -10,6 +10,9 @@ type Metrics struct {
 	BudgetCheckDenied   atomic.Int64
 	BudgetCheckFailOpen atomic.Int64
 	FailOpenTotal       atomic.Int64
+	SettleSuccess       atomic.Int64
+	SettleRetry         atomic.Int64
+	MissingUsage        atomic.Int64
 
 	reserveCount atomic.Int64
 	reserveSumNs atomic.Int64
@@ -20,9 +23,13 @@ func (m *Metrics) RecordReserve(duration time.Duration) {
 	m.reserveSumNs.Add(duration.Nanoseconds())
 }
 
-func (m *Metrics) IncAllowed()   { m.BudgetCheckAllowed.Add(1) }
-func (m *Metrics) IncDenied()    { m.BudgetCheckDenied.Add(1) }
-func (m *Metrics) IncFailOpen()  { m.FailOpenTotal.Add(1); m.BudgetCheckFailOpen.Add(1) }
+func (m *Metrics) IncAllowed()  { m.BudgetCheckAllowed.Add(1) }
+func (m *Metrics) IncDenied()   { m.BudgetCheckDenied.Add(1) }
+func (m *Metrics) IncFailOpen() { m.FailOpenTotal.Add(1); m.BudgetCheckFailOpen.Add(1) }
+
+func (m *Metrics) IncSettleSuccess() { m.SettleSuccess.Add(1) }
+func (m *Metrics) IncSettleRetry()   { m.SettleRetry.Add(1) }
+func (m *Metrics) IncMissingUsage()  { m.MissingUsage.Add(1) }
 
 func (m *Metrics) ReserveAvgMs() float64 {
 	count := m.reserveCount.Load()

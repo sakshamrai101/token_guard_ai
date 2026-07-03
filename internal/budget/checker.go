@@ -18,6 +18,7 @@ func NewRedisBudgetChecker(client *Client, metrics *Metrics) *RedisBudgetChecker
 	return &RedisBudgetChecker{client: client, metrics: metrics}
 }
 
+
 func (c *RedisBudgetChecker) Reserve(ctx context.Context, bucketID, requestID string, estimate int64) (ReserveResult, error) {
 	start := time.Now()
 	defer func() {

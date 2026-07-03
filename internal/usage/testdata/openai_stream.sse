@@ -1,0 +1,7 @@
+: this is a comment
+data: {"choices":[{"delta":{"content":"Hello"}}]}
+
+data: {"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30}}
+
+data: [DONE]
+

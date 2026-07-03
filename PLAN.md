@@ -216,6 +216,82 @@ For engineering constraints and standards, see [.cursorrules](.cursorrules). For
 
 ---
 
+## Post-MVP Launch Plan (v1 — Self-Hosted)
+
+**GTM decision (locked):** Ship as a **self-hosted drop-in proxy** first. Clients run proxy + Redis in their own infra. No user database, no managed SaaS, no signup/billing for v1.
+
+**Storage model (locked):** **Redis only** for v1. Budget balances and reservations live in Redis. Postgres/user accounts deferred until a hosted control plane is needed (v2).
+
+**Quality bar:** A devops-minded client can deploy in <30 minutes, prove enforcement works (shadow → enforce), and operate without `redis-cli`.
+
+### Launch-1 — Anthropic Provider Support (Track 2)
+
+**Build order:** Anthropic non-streaming first, then Anthropic SSE streaming. TDD per path. Run `go test ./...` between each.
+
+1. **`internal/usage/anthropic.go`**
+   - Non-streaming: parse `usage.input_tokens + usage.output_tokens` from Messages API JSON response
+   - `actual = input_tokens + output_tokens`
+
+2. **`internal/usage/anthropic_stream.go`**
+   - SSE: extract usage from `message_delta` and/or `message_stop` events
+   - Reuse existing `sse/parser.go`; Anthropic uses `event:` + `data:` lines
+
+3. **`internal/budget/estimate.go`**
+   - Extend request parsing for Anthropic Messages API body (`max_tokens` field)
+
+4. **Multi-provider routing**
+   - Select extractor pair by `UPSTREAM_HOST` or env `PROVIDER=openai|anthropic`
+   - `api.openai.com` → OpenAI; `api.anthropic.com` → Anthropic
+   - Wire in `cmd/proxy/main.go`
+
+5. **Tests**
+   - Unit: `testdata/anthropic_completion.json`, `testdata/anthropic_stream.sse`
+   - Integration: mock Anthropic upstream (stream + non-stream) → balance settled
+
+**NOT Launch-1:** Gemini, gzip decompress tap
+
+### Launch-2 — Production Ops (Track 1)
+
+1. **Admin API** (`internal/admin/`)
+   - `GET /admin/v1/buckets/{id}` → `{bucket_id, balance}`
+   - `PUT /admin/v1/buckets/{id}` → set balance `{"balance": N}`
+   - `POST /admin/v1/buckets/{id}/topup` → add tokens `{"amount": N}`
+   - Auth: `Authorization: Bearer $ADMIN_API_KEY`
+   - Add `set_budget.lua` for atomic admin writes (keeps Lua-only mutation rule)
+   - Rate-limit admin routes; register before catch-all `/` in `server.go`
+
+2. **Docker Compose** — `docker-compose.yml`, `Dockerfile`, `.env.example`
+
+3. **Docs** — update `README.md`; `docs/RUNBOOK.md` and `ONBOARDING.md` (in repo)
+
+4. **Smoke test checklist** in RUNBOOK (OpenAI + Anthropic, manual)
+
+### Launch-3 — Launch Essentials
+
+- [ ] `ADMIN_API_KEY` required for `/admin/*`; 401 if invalid
+- [ ] Admin routes never proxied upstream
+- [ ] Security doc: gateway-injected bucket IDs only
+- [ ] Docs default to `ENFORCEMENT_MODE=shadow` for first 48h
+- [ ] LICENSE file
+
+### OUT OF v1 Launch
+
+User DB, Postgres, Stripe, dashboard, managed SaaS, Gemini, Prometheus endpoint
+
+### v1 Launch Definition of Done
+
+- [ ] OpenAI + Anthropic stream/non-stream settle correctly
+- [ ] Admin API get/set/topup without redis-cli
+- [ ] Docker Compose works
+- [ ] README + RUNBOOK + ONBOARDING complete
+- [ ] `go test ./...` passes
+
+### Client Onboarding
+
+See [ONBOARDING.md](ONBOARDING.md) for full setup walkthrough.
+
+---
+
 ## Resolved Design Decisions
 
 | Decision | Choice | Notes |
@@ -226,6 +302,9 @@ For engineering constraints and standards, see [.cursorrules](.cursorrules). For
 | Day 2 settlement | Reserve + release on errors only | 200 responses hold until TTL; Day 3 settles with real usage |
 | Day 3 build order | Non-streaming → streaming → hardening | Incremental phases; TDD per phase |
 | Day 3 provider scope | OpenAI only | Anthropic deferred post-MVP |
+| GTM / launch model | Self-hosted first | No user DB; Redis only for v1 |
+| v1 providers | OpenAI + Anthropic | Gemini deferred |
+| Budget storage | Redis only (v1) | Postgres when hosted SaaS (v2) |
 
 ---
 

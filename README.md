@@ -13,11 +13,13 @@ Built for indie devs and small AI startups who want set-and-forget abuse protect
 - **Release** (full refund) on upstream 4xx/5xx
 - Parses `max_tokens` from the request body to estimate reservation size
 
-## What's next
+## What's next (Post-MVP Launch)
 
-- Parse `usage` from provider responses (streaming + non-streaming)
-- Wire `settle_budget` on successful 200 responses
-- Accurate balance reconciliation after each completion
+See [PLAN.md](PLAN.md) Post-MVP Launch Plan and [ONBOARDING.md](ONBOARDING.md) for v1 rollout.
+
+- Anthropic usage extraction (stream + non-stream)
+- Admin API for budget management (no redis-cli)
+- Docker Compose one-command deploy
 
 See [PLAN.md](PLAN.md) and [ARCHITECTURE.md](ARCHITECTURE.md) for the full roadmap and design rationale.
 

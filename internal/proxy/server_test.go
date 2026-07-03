@@ -1,0 +1,54 @@
+package proxy
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/saksham/token-guard-ai/internal/admin"
+	"github.com/saksham/token-guard-ai/internal/config"
+)
+
+func TestAdminRoutesNotProxied(t *testing.T) {
+	var proxied bool
+	proxyHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxied = true
+		w.WriteHeader(http.StatusOK)
+	})
+
+	adminHandler := admin.NewHandler(adminStubStore{}, "secret")
+	cfg := config.Config{}
+	server := NewServer(cfg, proxyHandler, adminHandler, nil, nil)
+	ts := httptest.NewServer(server)
+	t.Cleanup(ts.Close)
+
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/admin/v1/buckets/b1", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	resp.Body.Close()
+
+	if proxied {
+		t.Fatal("admin request was handled by proxy catch-all")
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+}
+
+type adminStubStore struct{}
+
+func (adminStubStore) GetBalance(_ context.Context, _ string) (int64, error) {
+	return 42, nil
+}
+
+func (adminStubStore) SetBalance(_ context.Context, _ string, balance int64) (int64, error) {
+	return balance, nil
+}
+
+func (adminStubStore) Topup(_ context.Context, _ string, amount int64) (int64, error) {
+	return amount, nil
+}

@@ -33,6 +33,7 @@ type Config struct {
 	DefaultReservationEst int64
 	PromptTokenBuffer     int64
 	SlackWebhookURL       string
+	AdminAPIKey           string
 }
 
 func Load() (Config, error) {
@@ -110,6 +111,7 @@ func Load() (Config, error) {
 		DefaultReservationEst: defaultEst,
 		PromptTokenBuffer:     promptBuffer,
 		SlackWebhookURL:       getEnv("SLACK_WEBHOOK_URL", ""),
+		AdminAPIKey:           getEnv("ADMIN_API_KEY", ""),
 	}, nil
 }
 

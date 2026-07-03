@@ -62,7 +62,7 @@ func TestConcurrentRequestsCannotOverspendWithSettlement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
-	proxyServer := proxy.NewServer(cfg, handler, budget.NewReadiness(client), nil)
+	proxyServer := proxy.NewServer(cfg, handler, nil, budget.NewReadiness(client), nil)
 	ts := httptest.NewServer(proxyServer)
 	t.Cleanup(ts.Close)
 
@@ -175,7 +175,7 @@ func TestGoroutineLeakOnAbortedStreams(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
-	ts := httptest.NewServer(proxy.NewServer(cfg, handler, budget.NewReadiness(client), nil))
+	ts := httptest.NewServer(proxy.NewServer(cfg, handler, nil, budget.NewReadiness(client), nil))
 	t.Cleanup(ts.Close)
 
 	abortClient := &http.Client{

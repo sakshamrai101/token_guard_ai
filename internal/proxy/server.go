@@ -19,12 +19,13 @@ func (alwaysReady) Ready() bool { return true }
 type Server struct {
 	cfg       config.Config
 	handler   http.Handler
+	admin     http.Handler
 	ready     ReadinessChecker
 	logger    *slog.Logger
 	mux       *http.ServeMux
 }
 
-func NewServer(cfg config.Config, handler http.Handler, ready ReadinessChecker, logger *slog.Logger) *Server {
+func NewServer(cfg config.Config, handler http.Handler, admin http.Handler, ready ReadinessChecker, logger *slog.Logger) *Server {
 	if ready == nil {
 		ready = alwaysReady{}
 	}
@@ -35,6 +36,7 @@ func NewServer(cfg config.Config, handler http.Handler, ready ReadinessChecker, 
 	s := &Server{
 		cfg:     cfg,
 		handler: handler,
+		admin:   admin,
 		ready:   ready,
 		logger:  logger,
 		mux:     http.NewServeMux(),
@@ -46,6 +48,9 @@ func NewServer(cfg config.Config, handler http.Handler, ready ReadinessChecker, 
 func (s *Server) routes() {
 	s.mux.HandleFunc("/healthz", s.handleHealthz)
 	s.mux.HandleFunc("/readyz", s.handleReadyz)
+	if s.admin != nil {
+		s.mux.Handle("/admin/", s.admin)
+	}
 	s.mux.Handle("/", s.handler)
 }
 

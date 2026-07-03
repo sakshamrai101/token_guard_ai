@@ -56,7 +56,7 @@ func newProviderBudgetTestStack(t *testing.T, upstreamHost string, mode config.E
 		t.Fatalf("NewHandler: %v", err)
 	}
 	readiness := budget.NewReadiness(client)
-	proxyServer := proxy.NewServer(cfg, handler, readiness, nil)
+	proxyServer := proxy.NewServer(cfg, handler, nil, readiness, nil)
 
 	ts := httptest.NewServer(proxyServer)
 	t.Cleanup(func() {

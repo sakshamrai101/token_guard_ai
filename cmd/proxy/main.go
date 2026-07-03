@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/saksham/token-guard-ai/internal/admin"
 	"github.com/saksham/token-guard-ai/internal/budget"
 	"github.com/saksham/token-guard-ai/internal/config"
 	"github.com/saksham/token-guard-ai/internal/proxy"
@@ -28,8 +29,10 @@ func main() {
 	var extractor usage.UsageExtractor
 	var streamExt usage.StreamExtractor
 	var readiness proxy.ReadinessChecker
+	var adminHandler *admin.Handler
 
-	if cfg.EnforcementMode != config.EnforcementOff {
+	needRedis := cfg.EnforcementMode != config.EnforcementOff || cfg.AdminAPIKey != ""
+	if needRedis {
 		redisClient, err := budget.NewClient(cfg)
 		if err != nil {
 			logger.Error("failed to connect to redis", "error", err)
@@ -37,14 +40,20 @@ func main() {
 		}
 		defer redisClient.Close()
 
-		budgetChecker := budget.NewRedisBudgetChecker(redisClient, metrics)
-		checker = proxy.NewBudgetCheckerBridge(budgetChecker)
-		releaser = redisClient
-		settler = redisClient
-		providers := usage.RegistryForHost(cfg.UpstreamHost)
-		extractor = providers.JSON
-		streamExt = providers.Stream
-		readiness = budget.NewReadiness(redisClient)
+		if cfg.AdminAPIKey != "" {
+			adminHandler = admin.NewHandler(admin.NewRedisStore(redisClient), cfg.AdminAPIKey)
+		}
+
+		if cfg.EnforcementMode != config.EnforcementOff {
+			budgetChecker := budget.NewRedisBudgetChecker(redisClient, metrics)
+			checker = proxy.NewBudgetCheckerBridge(budgetChecker)
+			releaser = redisClient
+			settler = redisClient
+			providers := usage.RegistryForHost(cfg.UpstreamHost)
+			extractor = providers.JSON
+			streamExt = providers.Stream
+			readiness = budget.NewReadiness(redisClient)
+		}
 	}
 
 	transport := proxy.NewTransport(cfg)
@@ -55,7 +64,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	server := proxy.NewServer(cfg, handler, readiness, logger)
+	server := proxy.NewServer(cfg, handler, adminHandler, readiness, logger)
 	if err := server.ListenAndServe(); err != nil {
 		logger.Error("server exited", "error", err)
 		os.Exit(1)

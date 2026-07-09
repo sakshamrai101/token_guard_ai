@@ -665,11 +665,106 @@ services:
 
 Do NOT combine Launch-1 and Launch-2 in one changeset.
 
-### 13.7 v1 Launch Definition of Done
+### 13.7 Engine Launch Definition of Done (Docker / self-host ops)
 
-- [ ] Anthropic stream + non-stream settlement works
-- [ ] Provider routing by upstream host
-- [ ] Admin API authenticated and tested
-- [ ] Docker Compose documented and working
-- [ ] ONBOARDING.md + RUNBOOK.md complete
-- [ ] All existing tests pass
+- [x] Anthropic stream + non-stream settlement works
+- [x] Provider routing by upstream host
+- [x] Admin API authenticated and tested
+- [x] Docker Compose documented and working
+- [x] ONBOARDING.md + RUNBOOK.md complete
+- [x] All existing tests pass
+
+---
+
+## 14. Hosted Product v1 Architecture (Multi-Tenant)
+
+### 14.1 How services talk
+
+1. **Customer app** sends LLM request to `https://proxy.tokenguard.ai/...` with:
+   - Provider auth header (passthrough: `Authorization` / `x-api-key`)
+   - `Authorization: Bearer tg_...` **or** `X-TokenGuard-Key: tg_...` (prefer dedicated header so it does not clash with OpenAI Bearer — **use `X-TokenGuard-Key`**)
+   - `X-Budget-Bucket-Id: <bucket>` (optional if org has a default bucket)
+2. **Proxy auth middleware** loads API key from Postgres → `org_id`, `plan`, `slack_webhook_url`, allowed buckets.
+3. **Budget path** uses Redis key `budget:{org_id}:{bucket_id}` with existing Lua reserve/settle/release.
+4. On settle/release, proxy **writes a usage_events row** (Postgres) and may fire Slack (80% / exhausted).
+5. **Stripe Checkout** (customer pays on landing) → webhook updates `orgs.plan` / `stripe_subscription_id`.
+6. **Admin / ops** use `ADMIN_API_KEY` (operator) or org-scoped admin later; v1 ops page uses operator admin key.
+
+Provider API keys never stored. Fail-open unchanged: Redis/Postgres auth failure policy — if key lookup fails hard, return 401 (auth); if Redis budget fails, fail-open forward (existing).
+
+### 14.2 Postgres schema (minimal)
+
+```
+orgs (
+  id, name, plan,  -- trial|indie|team
+  stripe_customer_id, stripe_subscription_id,
+  slack_webhook_url,
+  default_bucket_id,
+  token_quota_monthly, tokens_used_monthly,
+  created_at
+)
+
+api_keys (
+  id, org_id, key_hash, key_prefix,  -- store hash only; show raw once at creation
+  revoked_at, created_at
+)
+
+usage_events (
+  id, org_id, bucket_id, request_id,
+  reserved, actual, outcome,  -- settled|released|missing_usage|denied|fail_open
+  provider, created_at
+)
+```
+
+Redis: `budget:{org_id}:{bucket_id}`, `reservation:{request_id}` (unchanged semantics; bucket_id in hash includes org scope).
+
+### 14.3 Dump / admin API additions
+
+| Method | Path | Auth | Purpose |
+|--------|------|------|---------|
+| GET | `/admin/v1/buckets` | Admin | List known buckets + balances for ops (scan or Postgres bucket registry) |
+| GET | `/admin/v1/usage?org_id=&bucket_id=&limit=` | Admin | Recent usage_events |
+| GET | `/admin/v1/reservations` | Admin | Held reservations (SCAN `reservation:*` or Redis helper) |
+| GET | `/ops` | Admin (cookie or Bearer) | HTML ops page |
+
+Bucket registry: for v1, either track buckets in Postgres when first used / created via admin, or SCAN Redis `budget:*` for ops list. Prefer **Postgres `buckets(org_id, bucket_id)`** upserted on first reserve.
+
+### 14.4 Slack alerts (hosted v1)
+
+| Event | When |
+|-------|------|
+| `budget_exhausted` | Reserve denied in enforce |
+| `budget_warning_80` | After settle, remaining ≤ 20% of last known high-water or of configured budget cap |
+| `fail_open` | Existing CRITICAL path |
+
+Use org `slack_webhook_url` when set; else fall back to global `SLACK_WEBHOOK_URL`.
+
+### 14.5 Stripe
+
+- Products: Indie $15, Team $39 (test mode first)
+- Checkout Session → success URL shows “check email / dashboard for key” (v1: operator creates key via CLI/admin until H signup exists)
+- Webhook: `checkout.session.completed` / `customer.subscription.deleted` → update org plan
+- Enforce plan bucket count + monthly token quota using `usage_events` sum (soft warn; hard block optional in v1 — prefer soft warn + Slack)
+
+**v1 onboarding pragmatism:** Operator may create org + key via admin CLI/API after Stripe payment notification; self-serve key minting can be Post-v1 P1.
+
+### 14.6 Minimal ops page
+
+Server-rendered HTML (Go `html/template`), no SPA:
+
+- Table: bucket | balance
+- Table: last 50 usage_events
+- Table: open reservations (request_id, bucket, reserved, age)
+- Plain CSS, readable on mobile
+
+### 14.7 Compose additions
+
+```
+services: redis, postgres, proxy
+```
+
+Env: `DATABASE_URL`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, existing Redis/admin vars.
+
+### 14.8 Hosted v1 DoD
+
+See PLAN.md Hosted Product v1 Definition of Done.

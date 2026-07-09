@@ -19,6 +19,8 @@ Provider routing is by `UPSTREAM_HOST`: `api.openai.com` → OpenAI extractors; 
 
 See [PLAN.md](PLAN.md), [ARCHITECTURE.md](ARCHITECTURE.md), [ONBOARDING.md](ONBOARDING.md), and [docs/RUNBOOK.md](docs/RUNBOOK.md) for rollout and ops.
 
+**Next (Hosted Product v1):** multi-tenant API keys, Stripe ($15/$39), Slack alerts, usage dump, minimal `/ops` page — see PLAN.md **Hosted Product v1**.
+
 ## Docker quick start
 
 **Requirements:** Docker + Docker Compose

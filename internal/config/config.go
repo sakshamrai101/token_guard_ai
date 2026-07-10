@@ -34,6 +34,7 @@ type Config struct {
 	PromptTokenBuffer     int64
 	SlackWebhookURL       string
 	AdminAPIKey           string
+	DatabaseURL           string
 }
 
 func Load() (Config, error) {
@@ -112,6 +113,7 @@ func Load() (Config, error) {
 		PromptTokenBuffer:     promptBuffer,
 		SlackWebhookURL:       getEnv("SLACK_WEBHOOK_URL", ""),
 		AdminAPIKey:           getEnv("ADMIN_API_KEY", ""),
+		DatabaseURL:           getEnv("DATABASE_URL", ""),
 	}, nil
 }
 

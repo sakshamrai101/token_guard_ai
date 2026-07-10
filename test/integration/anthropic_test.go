@@ -51,7 +51,7 @@ func newProviderBudgetTestStack(t *testing.T, upstreamHost string, mode config.E
 	budgetChecker := budget.NewRedisBudgetChecker(client, metrics)
 	transport := proxy.NewTransport(cfg)
 	enforcement := proxy.NewEnforcement(cfg, proxy.NewBudgetCheckerBridge(budgetChecker), nil)
-	handler, err := proxy.NewHandler(cfg, transport, enforcement, client, client, providers.JSON, providers.Stream, metrics, nil, nil)
+	handler, err := proxy.NewHandler(cfg, transport, enforcement, client, client, providers.JSON, providers.Stream, metrics, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}

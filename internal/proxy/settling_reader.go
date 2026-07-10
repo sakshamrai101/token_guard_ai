@@ -85,15 +85,8 @@ func (r *settlingReader) finalize(outcome string, actual int64, countMissing boo
 		if countMissing && r.params.metrics != nil {
 			r.params.metrics.IncMissingUsage()
 		}
-		settleWithRetrySync(
-			context.WithoutCancel(r.params.ctx),
-			r.params.settler,
-			r.params.metrics,
-			r.params.requestID,
-			actual,
-			r.params.reserved,
-			outcome,
-			r.params.logger,
-		)
+		p := r.params
+		p.ctx = context.WithoutCancel(r.params.ctx)
+		settleWithRetrySync(p, actual, outcome)
 	})
 }

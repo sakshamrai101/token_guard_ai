@@ -43,7 +43,7 @@ func newAdminTestServer(t *testing.T, bucketBalance int64) (*httptest.Server, *m
 		w.WriteHeader(http.StatusTeapot)
 	})
 
-	adminHandler := admin.NewHandler(admin.NewRedisStore(client), cfg.AdminAPIKey)
+	adminHandler := admin.NewHandler(admin.NewRedisStore(client), nil, cfg.AdminAPIKey)
 	server := proxy.NewServer(cfg, proxyHandler, adminHandler, budget.NewReadiness(client), nil)
 	ts := httptest.NewServer(server)
 

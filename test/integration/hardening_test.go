@@ -58,7 +58,7 @@ func TestConcurrentRequestsCannotOverspendWithSettlement(t *testing.T) {
 	budgetChecker := budget.NewRedisBudgetChecker(client, metrics)
 	transport := proxy.NewTransport(cfg)
 	enforcement := proxy.NewEnforcement(cfg, proxy.NewBudgetCheckerBridge(budgetChecker), nil)
-	handler, err := proxy.NewHandler(cfg, transport, enforcement, client, client, usage.NewOpenAIExtractor(), usage.NewOpenAIStreamExtractor(), metrics, nil, nil)
+	handler, err := proxy.NewHandler(cfg, transport, enforcement, client, client, usage.NewOpenAIExtractor(), usage.NewOpenAIStreamExtractor(), metrics, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestGoroutineLeakOnAbortedStreams(t *testing.T) {
 	}
 	metrics := &budget.Metrics{}
 	budgetChecker := budget.NewRedisBudgetChecker(client, metrics)
-	handler, err := proxy.NewHandler(cfg, proxy.NewTransport(cfg), proxy.NewEnforcement(cfg, proxy.NewBudgetCheckerBridge(budgetChecker), nil), client, client, usage.NewOpenAIExtractor(), usage.NewOpenAIStreamExtractor(), metrics, nil, nil)
+	handler, err := proxy.NewHandler(cfg, proxy.NewTransport(cfg), proxy.NewEnforcement(cfg, proxy.NewBudgetCheckerBridge(budgetChecker), nil), client, client, usage.NewOpenAIExtractor(), usage.NewOpenAIStreamExtractor(), metrics, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}

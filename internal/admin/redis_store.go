@@ -25,3 +25,11 @@ func (s *RedisStore) SetBalance(ctx context.Context, bucketID string, balance in
 func (s *RedisStore) Topup(ctx context.Context, bucketID string, amount int64) (int64, error) {
 	return s.client.TopupBalance(ctx, bucketID, amount)
 }
+
+func (s *RedisStore) ListBuckets(ctx context.Context) ([]budget.BucketBalance, error) {
+	return s.client.ListBuckets(ctx)
+}
+
+func (s *RedisStore) ListReservations(ctx context.Context) ([]budget.ReservationHold, error) {
+	return s.client.ListReservations(ctx)
+}

@@ -8,6 +8,7 @@ import (
 	"github.com/saksham/token-guard-ai/internal/budget"
 	"github.com/saksham/token-guard-ai/internal/config"
 	"github.com/saksham/token-guard-ai/internal/proxy"
+	"github.com/saksham/token-guard-ai/internal/store"
 	"github.com/saksham/token-guard-ai/internal/usage"
 )
 
@@ -30,6 +31,25 @@ func main() {
 	var streamExt usage.StreamExtractor
 	var readiness proxy.ReadinessChecker
 	var adminHandler *admin.Handler
+	var usageStore store.UsageStore
+	var usageLogger store.UsageLogger
+
+	if cfg.DatabaseURL != "" {
+		pg, err := store.OpenPostgres(cfg.DatabaseURL)
+		if err != nil {
+			logger.Error("failed to connect to postgres", "error", err)
+			os.Exit(1)
+		}
+		defer pg.Close()
+		usageStore = pg
+		usageLogger = pg
+		logger.Info("usage store connected", "backend", "postgres")
+	} else {
+		mem := store.NewMemoryUsageStore()
+		usageStore = mem
+		usageLogger = mem
+		logger.Info("usage store connected", "backend", "memory")
+	}
 
 	needRedis := cfg.EnforcementMode != config.EnforcementOff || cfg.AdminAPIKey != ""
 	if needRedis {
@@ -41,7 +61,7 @@ func main() {
 		defer redisClient.Close()
 
 		if cfg.AdminAPIKey != "" {
-			adminHandler = admin.NewHandler(admin.NewRedisStore(redisClient), cfg.AdminAPIKey)
+			adminHandler = admin.NewHandler(admin.NewRedisStore(redisClient), usageStore, cfg.AdminAPIKey)
 		}
 
 		if cfg.EnforcementMode != config.EnforcementOff {
@@ -58,7 +78,7 @@ func main() {
 
 	transport := proxy.NewTransport(cfg)
 	enforcement := proxy.NewEnforcement(cfg, checker, logger)
-	handler, err := proxy.NewHandler(cfg, transport, enforcement, releaser, settler, extractor, streamExt, metrics, alerter, logger)
+	handler, err := proxy.NewHandler(cfg, transport, enforcement, releaser, settler, extractor, streamExt, metrics, alerter, usageLogger, logger)
 	if err != nil {
 		logger.Error("failed to create proxy handler", "error", err)
 		os.Exit(1)

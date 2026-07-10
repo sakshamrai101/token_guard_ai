@@ -292,6 +292,86 @@ See [ONBOARDING.md](ONBOARDING.md) for full setup walkthrough.
 
 ---
 
+## Hosted Product v1 (Lean Multi-Tenant)
+
+**GTM (locked):** You operate **one multi-tenant TokenGuard instance** on a VPS. Customers pay via Stripe → get a TokenGuard API key → point their SDK `base_url` at your proxy. Codebase remains deployable via Docker; you are the operator.
+
+**Quality bar:** Setup in minutes (change base_url + key). Slack when budgets warn/exhaust. Usage dump + minimal ops page. No React dashboard. Learn from demand before building more.
+
+**Pricing (locked for v1):**
+
+| Plan | Price | Limits |
+|------|-------|--------|
+| Trial | Free 14 days | 1 bucket, 200k tokens proxied |
+| Indie | **$15/mo** | 5 buckets, 5M tokens/mo, Slack |
+| Team | **$39/mo** | 25 buckets, 25M tokens/mo, Slack + usage dump |
+
+### Ship in Hosted v1 (P0)
+
+1. **Multi-tenant API keys** — `tg_xxx` → org → allowed buckets; auth on LLM path
+2. **Postgres** — orgs, api_keys, stripe ids, slack_webhook_url, plan, usage_events
+3. **Redis** — hot budgets only (`budget:{org_id}:{bucket_id}`)
+4. **Stripe Checkout + webhook** — activate/deactivate plan on org
+5. **Slack alerts (per org)** — budget exhausted, 80% warning after settle, fail-open
+6. **Request usage log** — every settle/release: request_id, org, bucket, reserved, actual, outcome, provider, ts
+7. **Dump APIs** — list buckets + balances; usage history; held reservations (JSON; CSV optional)
+8. **Minimal ops page** — single HTML page at `/ops` (admin-key gated): balances, recent requests, held reservations
+9. **VPS deploy** — docker-compose with proxy + redis + postgres; deploy notes in RUNBOOK
+
+### Explicitly OUT of Hosted v1
+
+- React/SPA dashboard
+- Gemini / Grok native extractors (OpenAI-compatible reuse is enough if needed later)
+- Interactive Slack buttons
+- Email notifications
+- Fancy charts / analytics
+- Holding customer provider API keys (passthrough only)
+- Per-customer self-hosted Docker as the paid SKU
+
+### Hosted v1 Build Order (strict — one phase per changeset)
+
+| Phase | Scope | Gate |
+|-------|-------|------|
+| **H1** | Usage event log on settle/release + dump API (`GET /admin/v1/usage`, list buckets) | `go test ./...` |
+| **H2** | Postgres schema: orgs, api_keys; TokenGuard key auth middleware on proxy path | `go test ./...` |
+| **H3** | Slack per-org webhook + 80% threshold alert after settle | `go test ./...` |
+| **H4** | Stripe Checkout + webhook → set org plan; reject over-limit orgs | `go test ./...` + manual Stripe test mode |
+| **H5** | Minimal `/ops` HTML page (balances, recent usage, held reservations) | manual smoke |
+| **H6** | Compose: postgres service + VPS deploy section in RUNBOOK; README hosted quickstart | deploy smoke |
+
+Do NOT combine H1–H4 into one PR. TDD for each phase. All existing tests must keep passing.
+
+### Hosted v1 Definition of Done
+
+- [ ] Customer with `tg_` key can call proxy; unknown key → 401
+- [ ] Budget keys scoped per org in Redis
+- [ ] Settled requests appear in usage dump
+- [ ] Slack fires on exhaust + 80% + fail-open
+- [ ] Stripe test-mode Checkout activates Indie/Team plan
+- [ ] `/ops` shows balances + recent requests (admin auth)
+- [ ] `docker compose up` runs proxy + redis + postgres
+- [ ] `go test ./...` green
+
+### Post–Hosted-v1 (build on demand)
+
+Overview of what comes next after interest is proven — **not in current builder scope**:
+
+| Priority | Feature | Why later |
+|----------|---------|-----------|
+| **P1** | Gemini native JSON + SSE extractors | Users ask for Google models |
+| **P1** | OpenAI-compatible upstream picker (Grok / custom base URL) in org settings | Model-agnostic without N parsers |
+| **P1** | Self-serve signup page (email → Stripe → key shown once) | Reduce manual onboarding |
+| **P2** | Real dashboard (React): charts, bucket CRUD, invite members | Demand for UI beyond `/ops` |
+| **P2** | Slack interactive top-up buttons | Nice-to-have after webhook works |
+| **P2** | Email alerts (Resend/Postmark) | Users without Slack |
+| **P2** | CSV export + longer retention / audit export | Team plan upsell |
+| **P3** | Hold provider keys in vault (optional) | Higher trust / complexity |
+| **P3** | SSO / multi-seat Team | Enterprise-ish |
+| **P3** | Prometheus `/metrics` + status page | Ops maturity |
+| **P3** | Community self-hosted free tier (docs only) | Lead gen; paid = hosted |
+
+---
+
 ## Resolved Design Decisions
 
 | Decision | Choice | Notes |
@@ -302,9 +382,11 @@ See [ONBOARDING.md](ONBOARDING.md) for full setup walkthrough.
 | Day 2 settlement | Reserve + release on errors only | 200 responses hold until TTL; Day 3 settles with real usage |
 | Day 3 build order | Non-streaming → streaming → hardening | Incremental phases; TDD per phase |
 | Day 3 provider scope | OpenAI only | Anthropic deferred post-MVP |
-| GTM / launch model | Self-hosted first | No user DB; Redis only for v1 |
-| v1 providers | OpenAI + Anthropic | Gemini deferred |
-| Budget storage | Redis only (v1) | Postgres when hosted SaaS (v2) |
+| Engine launch (Docker) | Self-hosted Redis + admin API | Complete on `production` branch |
+| **Paid product v1** | **You host one multi-tenant instance** | Stripe $15/$39; customers get `tg_` keys |
+| Hosted v1 storage | Redis (budgets) + Postgres (orgs, keys, usage, Stripe) | No React dashboard |
+| Hosted v1 UX | Ops HTML page + dump APIs + Slack | Dashboard post-v1 on demand |
+| Provider keys | Customer passthrough | TokenGuard does not store provider secrets |
 
 ---
 

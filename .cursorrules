@@ -242,3 +242,39 @@ Run `go test ./...` after each phase. Do NOT combine Launch-1 and Launch-2.
 
 - Update README when Launch-2b ships
 - ONBOARDING.md = client setup; docs/RUNBOOK.md = ops
+
+---
+
+## Hosted Product v1 Scope (Multi-Tenant Lean)
+
+### Locked decisions
+
+- You host ONE multi-tenant instance. Customers get `tg_` API keys after Stripe payment.
+- Redis = hot budgets only. Postgres = orgs, api_keys, usage_events, Stripe, Slack webhook.
+- Auth header for TokenGuard: `X-TokenGuard-Key` (do NOT overload OpenAI Bearer).
+- Redis budget key: `budget:{org_id}:{bucket_id}`.
+- No React dashboard. Minimal `/ops` HTML page only.
+- Pricing: Trial / Indie $15 / Team $39.
+- Provider keys: passthrough only — never store.
+
+### Build order (strict — one phase per changeset)
+
+1. **H1:** usage_events on settle/release + dump APIs
+2. **H2:** Postgres orgs/api_keys + auth middleware
+3. **H3:** per-org Slack + 80% warning
+4. **H4:** Stripe Checkout + webhook
+5. **H5:** `/ops` HTML page
+6. **H6:** compose postgres + VPS deploy docs
+
+Run `go test ./...` after each phase. Do NOT combine phases.
+
+### TDD & quality
+
+- Failing tests first for auth, usage log, Stripe webhook handlers, dump APIs.
+- All existing Day 1–3 + Launch tests MUST pass.
+- New packages: `internal/store` (Postgres), `internal/billing` (Stripe), extend `internal/admin` and `internal/proxy`.
+- No Gemini/Grok native extractors, no SPA, no email in this scope.
+
+### Out of scope (Post-v1)
+
+Gemini, OpenAI-compatible picker UI, self-serve signup polish, React dashboard, Slack buttons, email, SSO.

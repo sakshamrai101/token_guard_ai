@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/saksham/token-guard-ai/internal/admin"
+	"github.com/saksham/token-guard-ai/internal/budget"
 	"github.com/saksham/token-guard-ai/internal/config"
 )
 
@@ -17,7 +18,7 @@ func TestAdminRoutesNotProxied(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	adminHandler := admin.NewHandler(adminStubStore{}, "secret")
+	adminHandler := admin.NewHandler(adminStubStore{}, nil, "secret")
 	cfg := config.Config{}
 	server := NewServer(cfg, proxyHandler, adminHandler, nil, nil)
 	ts := httptest.NewServer(server)
@@ -51,4 +52,12 @@ func (adminStubStore) SetBalance(_ context.Context, _ string, balance int64) (in
 
 func (adminStubStore) Topup(_ context.Context, _ string, amount int64) (int64, error) {
 	return amount, nil
+}
+
+func (adminStubStore) ListBuckets(_ context.Context) ([]budget.BucketBalance, error) {
+	return nil, nil
+}
+
+func (adminStubStore) ListReservations(_ context.Context) ([]budget.ReservationHold, error) {
+	return nil, nil
 }

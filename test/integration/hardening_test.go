@@ -58,7 +58,7 @@ func TestConcurrentRequestsCannotOverspendWithSettlement(t *testing.T) {
 	budgetChecker := budget.NewRedisBudgetChecker(client, metrics)
 	transport := proxy.NewTransport(cfg)
 	enforcement := proxy.NewEnforcement(cfg, proxy.NewBudgetCheckerBridge(budgetChecker), nil)
-	handler, err := proxy.NewHandler(cfg, transport, enforcement, client, client, usage.NewOpenAIExtractor(), usage.NewOpenAIStreamExtractor(), metrics, nil, nil)
+	handler, err := proxy.NewHandler(cfg, transport, enforcement, client, client, usage.NewOpenAIExtractor(), usage.NewOpenAIStreamExtractor(), metrics, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestGoroutineLeakOnAbortedStreams(t *testing.T) {
 	}
 	metrics := &budget.Metrics{}
 	budgetChecker := budget.NewRedisBudgetChecker(client, metrics)
-	handler, err := proxy.NewHandler(cfg, proxy.NewTransport(cfg), proxy.NewEnforcement(cfg, proxy.NewBudgetCheckerBridge(budgetChecker), nil), client, client, usage.NewOpenAIExtractor(), usage.NewOpenAIStreamExtractor(), metrics, nil, nil)
+	handler, err := proxy.NewHandler(cfg, proxy.NewTransport(cfg), proxy.NewEnforcement(cfg, proxy.NewBudgetCheckerBridge(budgetChecker), nil), client, client, usage.NewOpenAIExtractor(), usage.NewOpenAIStreamExtractor(), metrics, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
@@ -230,6 +230,8 @@ func TestGoroutineLeakOnAbortedStreams(t *testing.T) {
 	if metrics.SettleSuccess.Load() < 900 {
 		t.Fatalf("settle success = %d, want at least 900", metrics.SettleSuccess.Load())
 	}
+	// Async settle retries run up to ~300ms; let stragglers finish before closing Redis.
+	time.Sleep(400 * time.Millisecond)
 
 	// Release miniredis connection-handler goroutines before counting; pool growth is
 	// test infrastructure noise, not proxy leaks.

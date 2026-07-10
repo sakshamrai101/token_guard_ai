@@ -96,14 +96,5 @@ func (t *streamTap) triggerSettle(outcome string, actual int64) {
 }
 
 func (t *streamTap) runSettle(outcome string, actual int64) {
-	settleWithRetryAsync(
-		t.params.ctx,
-		t.params.settler,
-		t.params.metrics,
-		t.params.requestID,
-		actual,
-		t.params.reserved,
-		outcome,
-		t.params.logger,
-	)
+	settleWithRetryAsync(t.params, actual, outcome)
 }

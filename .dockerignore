@@ -1,0 +1,7 @@
+.git
+.cursorrules
+*.md
+test/
+bin/
+.env
+.env.local

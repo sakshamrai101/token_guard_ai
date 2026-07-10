@@ -12,12 +12,14 @@ import (
 	"github.com/google/uuid"
 	"github.com/saksham/token-guard-ai/internal/budget"
 	"github.com/saksham/token-guard-ai/internal/config"
+	"github.com/saksham/token-guard-ai/internal/store"
 	"github.com/saksham/token-guard-ai/internal/usage"
 )
 
 type ctxKey string
 
 const requestIDContextKey ctxKey = "request_id"
+const bucketIDContextKey ctxKey = "bucket_id"
 
 type BudgetReleaser interface {
 	Release(ctx context.Context, requestID string) error
@@ -34,6 +36,7 @@ type Handler struct {
 	estimateCfg   budget.EstimateConfig
 	metrics       *budget.Metrics
 	alerter       *budget.Alerter
+	usageLogger   store.UsageLogger
 	upstreamURL   *url.URL
 	upstreamHost  string
 	logger        *slog.Logger
@@ -49,6 +52,7 @@ func NewHandler(
 	streamExt usage.StreamExtractor,
 	metrics *budget.Metrics,
 	alerter *budget.Alerter,
+	usageLogger store.UsageLogger,
 	logger *slog.Logger,
 ) (*Handler, error) {
 	upstream, err := url.Parse(cfg.UpstreamURL)
@@ -78,6 +82,7 @@ func NewHandler(
 		},
 		metrics:      metrics,
 		alerter:      alerter,
+		usageLogger:  usageLogger,
 		upstreamURL:  upstream,
 		upstreamHost: cfg.UpstreamHost,
 		logger:       logger,
@@ -154,6 +159,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	ctx := context.WithValue(r.Context(), requestIDContextKey, requestID)
 	ctx = context.WithValue(ctx, reservedContextKey, result.Reserved)
+	ctx = context.WithValue(ctx, bucketIDContextKey, bucketID)
 	h.proxy.ServeHTTP(w, r.WithContext(ctx))
 }
 
@@ -161,6 +167,8 @@ func (h *Handler) modifyResponse(resp *http.Response) error {
 	SanitizeResponseHeaders(resp.Header)
 
 	requestID, _ := resp.Request.Context().Value(requestIDContextKey).(string)
+	bucketID, _ := resp.Request.Context().Value(bucketIDContextKey).(string)
+	reserved, _ := resp.Request.Context().Value(reservedContextKey).(int64)
 
 	if resp.StatusCode >= 400 {
 		if h.releaser != nil && requestID != "" {
@@ -170,43 +178,53 @@ func (h *Handler) modifyResponse(resp *http.Response) error {
 					"status", resp.StatusCode,
 					"error", err,
 				)
+			} else {
+				h.logRelease(resp.Request.Context(), requestID, bucketID, reserved)
 			}
 		}
 		return nil
 	}
 
 	if resp.StatusCode == 200 && h.settler != nil && requestID != "" {
-		reserved, _ := resp.Request.Context().Value(reservedContextKey).(int64)
+		params := settlementParams{
+			settler:     h.settler,
+			metrics:     h.metrics,
+			usageLogger: h.usageLogger,
+			ctx:         resp.Request.Context(),
+			requestID:   requestID,
+			bucketID:    bucketID,
+			provider:    h.upstreamHost,
+			reserved:    reserved,
+			logger:      h.logger,
+		}
 		if isEventStream(resp.Header) && h.streamExt != nil {
-			resp.Body = newStreamTap(
-				resp.Body,
-				h.streamExt,
-				settlementParams{
-					settler:   h.settler,
-					metrics:   h.metrics,
-					ctx:       resp.Request.Context(),
-					requestID: requestID,
-					reserved:  reserved,
-					logger:    h.logger,
-				},
-			)
+			resp.Body = newStreamTap(resp.Body, h.streamExt, params)
 		} else if h.extractor != nil && !isEventStream(resp.Header) {
-			resp.Body = newSettlingReader(
-				resp.Body,
-				h.extractor,
-				settlementParams{
-					settler:   h.settler,
-					metrics:   h.metrics,
-					ctx:       resp.Request.Context(),
-					requestID: requestID,
-					reserved:  reserved,
-					logger:    h.logger,
-				},
-			)
+			resp.Body = newSettlingReader(resp.Body, h.extractor, params)
 		}
 	}
 
 	return nil
+}
+
+func (h *Handler) logRelease(ctx context.Context, requestID, bucketID string, reserved int64) {
+	if h.usageLogger == nil {
+		return
+	}
+	if err := h.usageLogger.LogUsage(ctx, store.UsageEvent{
+		OrgID:     store.DefaultOrgID,
+		BucketID:  bucketID,
+		RequestID: requestID,
+		Reserved:  reserved,
+		Actual:    0,
+		Outcome:   "released",
+		Provider:  h.upstreamHost,
+	}); err != nil {
+		h.logger.Error("failed to log release usage event",
+			"request_id", requestID,
+			"error", err,
+		)
+	}
 }
 
 func (h *Handler) director(req *http.Request) {
@@ -222,12 +240,16 @@ func (h *Handler) director(req *http.Request) {
 
 func (h *Handler) errorHandler(w http.ResponseWriter, r *http.Request, err error) {
 	requestID, _ := r.Context().Value(requestIDContextKey).(string)
+	bucketID, _ := r.Context().Value(bucketIDContextKey).(string)
+	reserved, _ := r.Context().Value(reservedContextKey).(int64)
 	if requestID != "" && h.releaser != nil {
 		if relErr := h.releaser.Release(r.Context(), requestID); relErr != nil {
 			h.logger.Error("failed to release budget on upstream transport error",
 				"request_id", requestID,
 				"error", relErr,
 			)
+		} else {
+			h.logRelease(r.Context(), requestID, bucketID, reserved)
 		}
 	}
 

@@ -4,9 +4,13 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/saksham/token-guard-ai/internal/budget"
+	"github.com/saksham/token-guard-ai/internal/store"
 )
 
 const defaultRateLimit = 60
@@ -26,14 +30,16 @@ type topupRequest struct {
 
 type Handler struct {
 	store  Store
+	usage  UsageQuerier
 	apiKey string
 	mux    *http.ServeMux
 	limit  *rateLimiter
 }
 
-func NewHandler(store Store, apiKey string) *Handler {
+func NewHandler(store Store, usage UsageQuerier, apiKey string) *Handler {
 	h := &Handler{
 		store:  store,
+		usage:  usage,
 		apiKey: apiKey,
 		mux:    http.NewServeMux(),
 		limit:  newRateLimiter(defaultRateLimit, time.Minute),
@@ -41,6 +47,9 @@ func NewHandler(store Store, apiKey string) *Handler {
 	h.mux.HandleFunc("GET /admin/v1/buckets/{id}", h.handleGet)
 	h.mux.HandleFunc("PUT /admin/v1/buckets/{id}", h.handlePut)
 	h.mux.HandleFunc("POST /admin/v1/buckets/{id}/topup", h.handleTopup)
+	h.mux.HandleFunc("GET /admin/v1/buckets", h.handleListBuckets)
+	h.mux.HandleFunc("GET /admin/v1/usage", h.handleListUsage)
+	h.mux.HandleFunc("GET /admin/v1/reservations", h.handleListReservations)
 	return h
 }
 
@@ -152,6 +161,56 @@ func (h *Handler) handleTopup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, bucketResponse{BucketID: bucketID, Balance: balance})
+}
+
+func (h *Handler) handleListBuckets(w http.ResponseWriter, r *http.Request) {
+	buckets, err := h.store.ListBuckets(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to list buckets"})
+		return
+	}
+	if buckets == nil {
+		buckets = []budget.BucketBalance{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"buckets": buckets})
+}
+
+func (h *Handler) handleListUsage(w http.ResponseWriter, r *http.Request) {
+	if h.usage == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"events": []any{}})
+		return
+	}
+	bucketID := r.URL.Query().Get("bucket_id")
+	limit := 50
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n <= 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid limit"})
+			return
+		}
+		limit = n
+	}
+	events, err := h.usage.ListUsage(r.Context(), bucketID, limit)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to list usage"})
+		return
+	}
+	if events == nil {
+		events = []store.UsageEvent{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"events": events})
+}
+
+func (h *Handler) handleListReservations(w http.ResponseWriter, r *http.Request) {
+	holds, err := h.store.ListReservations(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to list reservations"})
+		return
+	}
+	if holds == nil {
+		holds = []budget.ReservationHold{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"reservations": holds})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

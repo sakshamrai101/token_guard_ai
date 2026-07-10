@@ -64,7 +64,7 @@ func TestTransparentPassthrough(t *testing.T) {
 
 	transport := proxy.NewTransport(cfg)
 	enforcement := proxy.NewEnforcement(cfg, nil, nil)
-	handler, err := proxy.NewHandler(cfg, transport, enforcement, nil, nil, nil, nil, nil, nil, nil)
+	handler, err := proxy.NewHandler(cfg, transport, enforcement, nil, nil, nil, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}

@@ -57,7 +57,7 @@ func testHandler(t *testing.T, mode config.EnforcementMode, checker BudgetChecke
 		PreCheckTimeout:       50 * time.Millisecond,
 	}
 	enforcement := NewEnforcement(cfg, checker, nil)
-	handler, err := NewHandler(cfg, NewTransport(cfg), enforcement, releaser, nil, nil, nil, metrics, nil, nil)
+	handler, err := NewHandler(cfg, NewTransport(cfg), enforcement, releaser, nil, nil, nil, metrics, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
@@ -166,7 +166,7 @@ func TestHandlerModifyResponseReleasesOnUpstreamError(t *testing.T) {
 		UpstreamHost:    "example.com",
 		EnforcementMode: config.EnforcementEnforce,
 	}
-	handler, err := NewHandler(cfg, NewTransport(cfg), NewEnforcement(cfg, nil, nil), releaser, nil, nil, nil, nil, nil, nil)
+	handler, err := NewHandler(cfg, NewTransport(cfg), NewEnforcement(cfg, nil, nil), releaser, nil, nil, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
@@ -190,7 +190,7 @@ func TestHandlerModifyResponseReleasesOnUpstreamError(t *testing.T) {
 func TestHandlerModifyResponseSkipsReleaseOn200(t *testing.T) {
 	releaser := &stubReleaser{}
 	cfg := config.Config{UpstreamURL: "http://example.com", UpstreamHost: "example.com"}
-	handler, err := NewHandler(cfg, NewTransport(cfg), NewEnforcement(cfg, nil, nil), releaser, nil, nil, nil, nil, nil, nil)
+	handler, err := NewHandler(cfg, NewTransport(cfg), NewEnforcement(cfg, nil, nil), releaser, nil, nil, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}

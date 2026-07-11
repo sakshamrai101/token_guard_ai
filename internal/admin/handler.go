@@ -16,6 +16,7 @@ import (
 const defaultRateLimit = 60
 
 type bucketResponse struct {
+	OrgID    string `json:"org_id"`
 	BucketID string `json:"bucket_id"`
 	Balance  int64  `json:"balance"`
 }
@@ -28,18 +29,34 @@ type topupRequest struct {
 	Amount int64 `json:"amount"`
 }
 
+type createOrgRequest struct {
+	Name string `json:"name"`
+}
+
+type createKeyResponse struct {
+	Key     string     `json:"key"`
+	APIKey  store.APIKey `json:"api_key"`
+	Warning string     `json:"warning"`
+}
+
 type Handler struct {
 	store  Store
 	usage  UsageQuerier
+	orgs   store.OrgStore
 	apiKey string
 	mux    *http.ServeMux
 	limit  *rateLimiter
 }
 
-func NewHandler(store Store, usage UsageQuerier, apiKey string) *Handler {
+func NewHandler(budgetStore Store, usage UsageQuerier, apiKey string) *Handler {
+	return NewHandlerWithOrgs(budgetStore, usage, nil, apiKey)
+}
+
+func NewHandlerWithOrgs(budgetStore Store, usage UsageQuerier, orgs store.OrgStore, apiKey string) *Handler {
 	h := &Handler{
-		store:  store,
+		store:  budgetStore,
 		usage:  usage,
+		orgs:   orgs,
 		apiKey: apiKey,
 		mux:    http.NewServeMux(),
 		limit:  newRateLimiter(defaultRateLimit, time.Minute),
@@ -50,6 +67,9 @@ func NewHandler(store Store, usage UsageQuerier, apiKey string) *Handler {
 	h.mux.HandleFunc("GET /admin/v1/buckets", h.handleListBuckets)
 	h.mux.HandleFunc("GET /admin/v1/usage", h.handleListUsage)
 	h.mux.HandleFunc("GET /admin/v1/reservations", h.handleListReservations)
+	h.mux.HandleFunc("POST /admin/v1/orgs", h.handleCreateOrg)
+	h.mux.HandleFunc("GET /admin/v1/orgs", h.handleListOrgs)
+	h.mux.HandleFunc("POST /admin/v1/orgs/{id}/keys", h.handleCreateKey)
 	return h
 }
 
@@ -86,19 +106,26 @@ func (h *Handler) authenticate(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 
+func orgIDFromRequest(r *http.Request) string {
+	if v := r.URL.Query().Get("org_id"); v != "" {
+		return v
+	}
+	return store.DefaultOrgID
+}
+
 func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request) {
 	bucketID := r.PathValue("id")
 	if bucketID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing bucket id"})
 		return
 	}
-
-	balance, err := h.store.GetBalance(r.Context(), bucketID)
+	orgID := orgIDFromRequest(r)
+	balance, err := h.store.GetBalance(r.Context(), orgID, bucketID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to get balance"})
 		return
 	}
-	writeJSON(w, http.StatusOK, bucketResponse{BucketID: bucketID, Balance: balance})
+	writeJSON(w, http.StatusOK, bucketResponse{OrgID: orgID, BucketID: bucketID, Balance: balance})
 }
 
 func (h *Handler) handlePut(w http.ResponseWriter, r *http.Request) {
@@ -107,13 +134,11 @@ func (h *Handler) handlePut(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing bucket id"})
 		return
 	}
-
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
 		return
 	}
-
 	var req setBalanceRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
@@ -123,13 +148,13 @@ func (h *Handler) handlePut(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "balance must be non-negative"})
 		return
 	}
-
-	balance, err := h.store.SetBalance(r.Context(), bucketID, req.Balance)
+	orgID := orgIDFromRequest(r)
+	balance, err := h.store.SetBalance(r.Context(), orgID, bucketID, req.Balance)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to set balance"})
 		return
 	}
-	writeJSON(w, http.StatusOK, bucketResponse{BucketID: bucketID, Balance: balance})
+	writeJSON(w, http.StatusOK, bucketResponse{OrgID: orgID, BucketID: bucketID, Balance: balance})
 }
 
 func (h *Handler) handleTopup(w http.ResponseWriter, r *http.Request) {
@@ -138,13 +163,11 @@ func (h *Handler) handleTopup(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing bucket id"})
 		return
 	}
-
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
 		return
 	}
-
 	var req topupRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
@@ -154,13 +177,13 @@ func (h *Handler) handleTopup(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "amount must be positive"})
 		return
 	}
-
-	balance, err := h.store.Topup(r.Context(), bucketID, req.Amount)
+	orgID := orgIDFromRequest(r)
+	balance, err := h.store.Topup(r.Context(), orgID, bucketID, req.Amount)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to topup"})
 		return
 	}
-	writeJSON(w, http.StatusOK, bucketResponse{BucketID: bucketID, Balance: balance})
+	writeJSON(w, http.StatusOK, bucketResponse{OrgID: orgID, BucketID: bucketID, Balance: balance})
 }
 
 func (h *Handler) handleListBuckets(w http.ResponseWriter, r *http.Request) {
@@ -211,6 +234,72 @@ func (h *Handler) handleListReservations(w http.ResponseWriter, r *http.Request)
 		holds = []budget.ReservationHold{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"reservations": holds})
+}
+
+func (h *Handler) handleCreateOrg(w http.ResponseWriter, r *http.Request) {
+	if h.orgs == nil {
+		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "org store not configured"})
+		return
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+	var req createOrgRequest
+	if err := json.Unmarshal(body, &req); err != nil || strings.TrimSpace(req.Name) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name is required"})
+		return
+	}
+	org, err := h.orgs.CreateOrg(r.Context(), strings.TrimSpace(req.Name))
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create org"})
+		return
+	}
+	writeJSON(w, http.StatusCreated, org)
+}
+
+func (h *Handler) handleListOrgs(w http.ResponseWriter, r *http.Request) {
+	if h.orgs == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"orgs": []any{}})
+		return
+	}
+	orgs, err := h.orgs.ListOrgs(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to list orgs"})
+		return
+	}
+	if orgs == nil {
+		orgs = []store.Org{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"orgs": orgs})
+}
+
+func (h *Handler) handleCreateKey(w http.ResponseWriter, r *http.Request) {
+	if h.orgs == nil {
+		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "org store not configured"})
+		return
+	}
+	orgID := r.PathValue("id")
+	if orgID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing org id"})
+		return
+	}
+	raw, key, err := h.orgs.CreateAPIKey(r.Context(), orgID)
+	if err == store.ErrNotFound {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "org not found"})
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create key"})
+		return
+	}
+	key.KeyHash = "" // never return hash
+	writeJSON(w, http.StatusCreated, createKeyResponse{
+		Key:     raw,
+		APIKey:  key,
+		Warning: "store this key now; it will not be shown again",
+	})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

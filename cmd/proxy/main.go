@@ -2,6 +2,7 @@ package main
 
 import (
 	"log/slog"
+	"net/http"
 	"os"
 
 	"github.com/saksham/token-guard-ai/internal/admin"
@@ -33,6 +34,8 @@ func main() {
 	var adminHandler *admin.Handler
 	var usageStore store.UsageStore
 	var usageLogger store.UsageLogger
+	var orgStore store.OrgStore
+	requireAuth := false
 
 	if cfg.DatabaseURL != "" {
 		pg, err := store.OpenPostgres(cfg.DatabaseURL)
@@ -43,15 +46,17 @@ func main() {
 		defer pg.Close()
 		usageStore = pg
 		usageLogger = pg
-		logger.Info("usage store connected", "backend", "postgres")
+		orgStore = pg
+		requireAuth = true
+		logger.Info("usage store connected", "backend", "postgres", "multi_tenant", true)
 	} else {
 		mem := store.NewMemoryUsageStore()
 		usageStore = mem
 		usageLogger = mem
-		logger.Info("usage store connected", "backend", "memory")
+		logger.Info("usage store connected", "backend", "memory", "multi_tenant", false)
 	}
 
-	needRedis := cfg.EnforcementMode != config.EnforcementOff || cfg.AdminAPIKey != ""
+	needRedis := cfg.EnforcementMode != config.EnforcementOff || cfg.AdminAPIKey != "" || requireAuth
 	if needRedis {
 		redisClient, err := budget.NewClient(cfg)
 		if err != nil {
@@ -61,7 +66,7 @@ func main() {
 		defer redisClient.Close()
 
 		if cfg.AdminAPIKey != "" {
-			adminHandler = admin.NewHandler(admin.NewRedisStore(redisClient), usageStore, cfg.AdminAPIKey)
+			adminHandler = admin.NewHandlerWithOrgs(admin.NewRedisStore(redisClient), usageStore, orgStore, cfg.AdminAPIKey)
 		}
 
 		if cfg.EnforcementMode != config.EnforcementOff {
@@ -78,13 +83,23 @@ func main() {
 
 	transport := proxy.NewTransport(cfg)
 	enforcement := proxy.NewEnforcement(cfg, checker, logger)
-	handler, err := proxy.NewHandler(cfg, transport, enforcement, releaser, settler, extractor, streamExt, metrics, alerter, usageLogger, logger)
+	handler, err := proxy.NewHandlerWithRegistry(cfg, transport, enforcement, releaser, settler, extractor, streamExt, metrics, alerter, usageLogger, orgStore, logger)
 	if err != nil {
 		logger.Error("failed to create proxy handler", "error", err)
 		os.Exit(1)
 	}
 
-	server := proxy.NewServer(cfg, handler, adminHandler, readiness, logger)
+	var llm http.Handler = handler
+	if requireAuth {
+		if orgStore == nil {
+			logger.Error("multi-tenant auth required but org store is nil")
+			os.Exit(1)
+		}
+		llm = proxy.NewAuthMiddleware(orgStore, handler)
+		logger.Info("token guard auth enabled", "header", "X-TokenGuard-Key")
+	}
+
+	server := proxy.NewServer(cfg, llm, adminHandler, readiness, logger)
 	if err := server.ListenAndServe(); err != nil {
 		logger.Error("server exited", "error", err)
 		os.Exit(1)

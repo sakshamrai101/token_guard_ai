@@ -37,6 +37,7 @@ type Handler struct {
 	metrics       *budget.Metrics
 	alerter       *budget.Alerter
 	usageLogger   store.UsageLogger
+	bucketReg     store.OrgStore
 	upstreamURL   *url.URL
 	upstreamHost  string
 	logger        *slog.Logger
@@ -53,6 +54,23 @@ func NewHandler(
 	metrics *budget.Metrics,
 	alerter *budget.Alerter,
 	usageLogger store.UsageLogger,
+	logger *slog.Logger,
+) (*Handler, error) {
+	return NewHandlerWithRegistry(cfg, transport, enforcement, releaser, settler, extractor, streamExt, metrics, alerter, usageLogger, nil, logger)
+}
+
+func NewHandlerWithRegistry(
+	cfg config.Config,
+	transport *http.Transport,
+	enforcement *Enforcement,
+	releaser BudgetReleaser,
+	settler BudgetSettler,
+	extractor usage.UsageExtractor,
+	streamExt usage.StreamExtractor,
+	metrics *budget.Metrics,
+	alerter *budget.Alerter,
+	usageLogger store.UsageLogger,
+	bucketReg store.OrgStore,
 	logger *slog.Logger,
 ) (*Handler, error) {
 	upstream, err := url.Parse(cfg.UpstreamURL)
@@ -83,6 +101,7 @@ func NewHandler(
 		metrics:      metrics,
 		alerter:      alerter,
 		usageLogger:  usageLogger,
+		bucketReg:    bucketReg,
 		upstreamURL:  upstream,
 		upstreamHost: cfg.UpstreamHost,
 		logger:       logger,
@@ -105,6 +124,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r.Header.Set("X-Request-Id", requestID)
 	}
 	bucketID := r.Header.Get("X-Budget-Bucket-Id")
+	orgID := OrgIDFromContext(r.Context())
 
 	body, restored, err := budget.ReadAndRestoreBody(r.Body)
 	if err != nil {
@@ -126,7 +146,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		result = PreCheckResult{Allowed: true, FailOpen: true}
 		outcome = "fail_open"
 	} else {
-		result = h.enforcement.PreCheck(r.Context(), bucketID, requestID, estimate)
+		result = h.enforcement.PreCheck(r.Context(), orgID, bucketID, requestID, estimate)
 		switch {
 		case result.FailOpen:
 			h.metrics.IncFailOpen()
@@ -137,11 +157,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			outcome = "denied"
 		default:
 			outcome = "allowed"
+			if h.bucketReg != nil && bucketID != "" && !result.FailOpen {
+				_ = h.bucketReg.UpsertBucket(r.Context(), orgID, bucketID)
+			}
 		}
 	}
 
 	h.logger.Info("budget check",
 		"request_id", requestID,
+		"org_id", orgID,
 		"bucket_id", bucketID,
 		"reserved", result.Reserved,
 		"estimate", estimate,
@@ -160,6 +184,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := context.WithValue(r.Context(), requestIDContextKey, requestID)
 	ctx = context.WithValue(ctx, reservedContextKey, result.Reserved)
 	ctx = context.WithValue(ctx, bucketIDContextKey, bucketID)
+	ctx = context.WithValue(ctx, orgIDContextKey, orgID)
 	h.proxy.ServeHTTP(w, r.WithContext(ctx))
 }
 
@@ -169,6 +194,7 @@ func (h *Handler) modifyResponse(resp *http.Response) error {
 	requestID, _ := resp.Request.Context().Value(requestIDContextKey).(string)
 	bucketID, _ := resp.Request.Context().Value(bucketIDContextKey).(string)
 	reserved, _ := resp.Request.Context().Value(reservedContextKey).(int64)
+	orgID := OrgIDFromContext(resp.Request.Context())
 
 	if resp.StatusCode >= 400 {
 		if h.releaser != nil && requestID != "" {
@@ -179,7 +205,7 @@ func (h *Handler) modifyResponse(resp *http.Response) error {
 					"error", err,
 				)
 			} else {
-				h.logRelease(resp.Request.Context(), requestID, bucketID, reserved)
+				h.logRelease(resp.Request.Context(), orgID, requestID, bucketID, reserved)
 			}
 		}
 		return nil
@@ -192,6 +218,7 @@ func (h *Handler) modifyResponse(resp *http.Response) error {
 			usageLogger: h.usageLogger,
 			ctx:         resp.Request.Context(),
 			requestID:   requestID,
+			orgID:       orgID,
 			bucketID:    bucketID,
 			provider:    h.upstreamHost,
 			reserved:    reserved,
@@ -207,12 +234,15 @@ func (h *Handler) modifyResponse(resp *http.Response) error {
 	return nil
 }
 
-func (h *Handler) logRelease(ctx context.Context, requestID, bucketID string, reserved int64) {
+func (h *Handler) logRelease(ctx context.Context, orgID, requestID, bucketID string, reserved int64) {
 	if h.usageLogger == nil {
 		return
 	}
+	if orgID == "" {
+		orgID = store.DefaultOrgID
+	}
 	if err := h.usageLogger.LogUsage(ctx, store.UsageEvent{
-		OrgID:     store.DefaultOrgID,
+		OrgID:     orgID,
 		BucketID:  bucketID,
 		RequestID: requestID,
 		Reserved:  reserved,
@@ -242,6 +272,7 @@ func (h *Handler) errorHandler(w http.ResponseWriter, r *http.Request, err error
 	requestID, _ := r.Context().Value(requestIDContextKey).(string)
 	bucketID, _ := r.Context().Value(bucketIDContextKey).(string)
 	reserved, _ := r.Context().Value(reservedContextKey).(int64)
+	orgID := OrgIDFromContext(r.Context())
 	if requestID != "" && h.releaser != nil {
 		if relErr := h.releaser.Release(r.Context(), requestID); relErr != nil {
 			h.logger.Error("failed to release budget on upstream transport error",
@@ -249,7 +280,7 @@ func (h *Handler) errorHandler(w http.ResponseWriter, r *http.Request, err error
 				"error", relErr,
 			)
 		} else {
-			h.logRelease(r.Context(), requestID, bucketID, reserved)
+			h.logRelease(r.Context(), orgID, requestID, bucketID, reserved)
 		}
 	}
 

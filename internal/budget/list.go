@@ -10,6 +10,7 @@ import (
 
 // BucketBalance is a Redis budget key and its remaining balance.
 type BucketBalance struct {
+	OrgID    string `json:"org_id"`
 	BucketID string `json:"bucket_id"`
 	Balance  int64  `json:"balance"`
 }
@@ -17,6 +18,7 @@ type BucketBalance struct {
 // ReservationHold is an unsettled reservation.
 type ReservationHold struct {
 	RequestID string    `json:"request_id"`
+	OrgID     string    `json:"org_id"`
 	BucketID  string    `json:"bucket_id"`
 	Reserved  int64     `json:"reserved"`
 	CreatedAt time.Time `json:"created_at,omitempty"`
@@ -33,12 +35,13 @@ func (c *Client) ListBuckets(ctx context.Context) ([]BucketBalance, error) {
 			return nil, fmt.Errorf("scan budget keys: %w", err)
 		}
 		for _, key := range keys {
-			bucketID := strings.TrimPrefix(key, "budget:")
+			rest := strings.TrimPrefix(key, "budget:")
+			orgID, bucketID := ParseScopedBucket(rest)
 			bal, err := c.rdb.Get(ctx, key).Int64()
 			if err != nil {
 				continue
 			}
-			out = append(out, BucketBalance{BucketID: bucketID, Balance: bal})
+			out = append(out, BucketBalance{OrgID: orgID, BucketID: bucketID, Balance: bal})
 		}
 		cursor = next
 		if cursor == 0 {
@@ -64,9 +67,11 @@ func (c *Client) ListReservations(ctx context.Context) ([]ReservationHold, error
 				continue
 			}
 			reserved, _ := strconv.ParseInt(vals["reserved"], 10, 64)
+			orgID, bucketID := ParseScopedBucket(vals["bucket_id"])
 			hold := ReservationHold{
 				RequestID: strings.TrimPrefix(key, "reservation:"),
-				BucketID:  vals["bucket_id"],
+				OrgID:     orgID,
+				BucketID:  bucketID,
 				Reserved:  reserved,
 			}
 			if ts, err := strconv.ParseInt(vals["created_at"], 10, 64); err == nil && ts > 0 {

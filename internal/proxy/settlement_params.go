@@ -14,6 +14,7 @@ type settlementParams struct {
 	usageLogger store.UsageLogger
 	ctx         context.Context
 	requestID   string
+	orgID       string
 	bucketID    string
 	provider    string
 	reserved    int64

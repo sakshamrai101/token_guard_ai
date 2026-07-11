@@ -89,5 +89,32 @@ func (c *Client) Ready(ctx context.Context) bool {
 	return c.rdb.Ping(ctx).Err() == nil
 }
 
-func budgetKey(bucketID string) string  { return "budget:" + bucketID }
+// budgetKey returns Redis key budget:{orgID}:{bucketID}.
+// Empty orgID falls back to "default" for single-tenant / self-hosted mode.
+func budgetKey(orgID, bucketID string) string {
+	if orgID == "" {
+		orgID = "default"
+	}
+	return "budget:" + orgID + ":" + bucketID
+}
+
+// scopedBucketID is stored in the reservation hash so Lua settle/release
+// can rebuild budget:{org}:{bucket} via 'budget:' .. bucket_id.
+func scopedBucketID(orgID, bucketID string) string {
+	if orgID == "" {
+		orgID = "default"
+	}
+	return orgID + ":" + bucketID
+}
+
 func reservationKey(requestID string) string { return "reservation:" + requestID }
+
+// ParseScopedBucket splits "org:bucket" from a reservation hash field.
+func ParseScopedBucket(scoped string) (orgID, bucketID string) {
+	for i := 0; i < len(scoped); i++ {
+		if scoped[i] == ':' {
+			return scoped[:i], scoped[i+1:]
+		}
+	}
+	return "default", scoped
+}

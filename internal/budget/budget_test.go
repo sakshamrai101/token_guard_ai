@@ -21,7 +21,7 @@ func setupTestClient(t *testing.T, balance int64) (*miniredis.Miniredis, *Client
 		t.Fatalf("NewClientFromRedis: %v", err)
 	}
 	if balance > 0 {
-		mr.Set("budget:test-bucket", strconv.FormatInt(balance, 10))
+		mr.Set("budget:default:test-bucket", strconv.FormatInt(balance, 10))
 	}
 	return mr, client
 }
@@ -30,7 +30,7 @@ func TestReserveBudgetAllowsAndDeducts(t *testing.T) {
 	_, client := setupTestClient(t, 5000)
 	checker := NewRedisBudgetChecker(client, nil)
 
-	result, err := checker.Reserve(context.Background(), "test-bucket", "req-1", 1536)
+	result, err := checker.Reserve(context.Background(), "default", "test-bucket", "req-1", 1536)
 	if err != nil {
 		t.Fatalf("Reserve: %v", err)
 	}
@@ -38,7 +38,7 @@ func TestReserveBudgetAllowsAndDeducts(t *testing.T) {
 		t.Fatalf("result = %+v, want allowed with reserved=1536", result)
 	}
 
-	bal, _ := client.rdb.Get(context.Background(), budgetKey("test-bucket")).Int64()
+	bal, _ := client.rdb.Get(context.Background(), budgetKey("default", "test-bucket")).Int64()
 	if bal != 3464 {
 		t.Fatalf("balance = %d, want 3464", bal)
 	}
@@ -48,7 +48,7 @@ func TestReserveBudgetDeniesWhenInsufficient(t *testing.T) {
 	_, client := setupTestClient(t, 100)
 	checker := NewRedisBudgetChecker(client, nil)
 
-	result, err := checker.Reserve(context.Background(), "test-bucket", "req-1", 500)
+	result, err := checker.Reserve(context.Background(), "default", "test-bucket", "req-1", 500)
 	if err != nil {
 		t.Fatalf("Reserve: %v", err)
 	}
@@ -56,7 +56,7 @@ func TestReserveBudgetDeniesWhenInsufficient(t *testing.T) {
 		t.Fatal("expected deny when balance insufficient")
 	}
 
-	bal, _ := client.rdb.Get(context.Background(), budgetKey("test-bucket")).Int64()
+	bal, _ := client.rdb.Get(context.Background(), budgetKey("default", "test-bucket")).Int64()
 	if bal != 100 {
 		t.Fatalf("balance should be unchanged, got %d", bal)
 	}
@@ -66,11 +66,11 @@ func TestReserveBudgetIdempotent(t *testing.T) {
 	_, client := setupTestClient(t, 5000)
 	checker := NewRedisBudgetChecker(client, nil)
 
-	r1, err := checker.Reserve(context.Background(), "test-bucket", "req-dup", 1000)
+	r1, err := checker.Reserve(context.Background(), "default", "test-bucket", "req-dup", 1000)
 	if err != nil {
 		t.Fatalf("first Reserve: %v", err)
 	}
-	r2, err := checker.Reserve(context.Background(), "test-bucket", "req-dup", 1000)
+	r2, err := checker.Reserve(context.Background(), "default", "test-bucket", "req-dup", 1000)
 	if err != nil {
 		t.Fatalf("second Reserve: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestReserveBudgetIdempotent(t *testing.T) {
 		t.Fatalf("reserved amounts differ: %d vs %d", r1.Reserved, r2.Reserved)
 	}
 
-	bal, _ := client.rdb.Get(context.Background(), budgetKey("test-bucket")).Int64()
+	bal, _ := client.rdb.Get(context.Background(), budgetKey("default", "test-bucket")).Int64()
 	if bal != 4000 {
 		t.Fatalf("balance = %d, want 4000 (single hold)", bal)
 	}
@@ -91,7 +91,7 @@ func TestReleaseBudgetRefundsHold(t *testing.T) {
 	_, client := setupTestClient(t, 5000)
 	checker := NewRedisBudgetChecker(client, nil)
 
-	_, err := checker.Reserve(context.Background(), "test-bucket", "req-rel", 2000)
+	_, err := checker.Reserve(context.Background(), "default", "test-bucket", "req-rel", 2000)
 	if err != nil {
 		t.Fatalf("Reserve: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestReleaseBudgetRefundsHold(t *testing.T) {
 		t.Fatalf("Release: %v", err)
 	}
 
-	bal, _ := client.rdb.Get(context.Background(), budgetKey("test-bucket")).Int64()
+	bal, _ := client.rdb.Get(context.Background(), budgetKey("default", "test-bucket")).Int64()
 	if bal != 5000 {
 		t.Fatalf("balance after release = %d, want 5000", bal)
 	}
@@ -113,7 +113,7 @@ func TestSettleBudgetReconcilesActual(t *testing.T) {
 	_, client := setupTestClient(t, 5000)
 	checker := NewRedisBudgetChecker(client, nil)
 
-	_, err := checker.Reserve(context.Background(), "test-bucket", "req-set", 2000)
+	_, err := checker.Reserve(context.Background(), "default", "test-bucket", "req-set", 2000)
 	if err != nil {
 		t.Fatalf("Reserve: %v", err)
 	}
@@ -122,20 +122,20 @@ func TestSettleBudgetReconcilesActual(t *testing.T) {
 	if err := client.Settle(context.Background(), "req-set", 2500); err != nil {
 		t.Fatalf("Settle: %v", err)
 	}
-	bal, _ := client.rdb.Get(context.Background(), budgetKey("test-bucket")).Int64()
+	bal, _ := client.rdb.Get(context.Background(), budgetKey("default", "test-bucket")).Int64()
 	if bal != 2500 {
 		t.Fatalf("balance after settle(actual>reserved) = %d, want 2500", bal)
 	}
 
 	// reserve again and settle with actual < reserved
-	_, err = checker.Reserve(context.Background(), "test-bucket", "req-set2", 2000)
+	_, err = checker.Reserve(context.Background(), "default", "test-bucket", "req-set2", 2000)
 	if err != nil {
 		t.Fatalf("Reserve: %v", err)
 	}
 	if err := client.Settle(context.Background(), "req-set2", 1500); err != nil {
 		t.Fatalf("Settle: %v", err)
 	}
-	bal, _ = client.rdb.Get(context.Background(), budgetKey("test-bucket")).Int64()
+	bal, _ = client.rdb.Get(context.Background(), budgetKey("default", "test-bucket")).Int64()
 	if bal != 1000 {
 		t.Fatalf("balance after settle(actual<reserved) = %d, want 1000", bal)
 	}
@@ -157,7 +157,7 @@ func TestConcurrentReserveNoOverspend(t *testing.T) {
 	for i := 0; i < workers; i++ {
 		go func(i int) {
 			defer wg.Done()
-			result, err := checker.Reserve(context.Background(), "test-bucket", "req-"+strconv.Itoa(i), estimate)
+			result, err := checker.Reserve(context.Background(), "default", "test-bucket", "req-"+strconv.Itoa(i), estimate)
 			if err != nil {
 				t.Errorf("Reserve: %v", err)
 				return
@@ -173,7 +173,7 @@ func TestConcurrentReserveNoOverspend(t *testing.T) {
 		t.Fatalf("allowed = %d, want %d", allowed, maxAllows)
 	}
 
-	bal, _ := client.rdb.Get(context.Background(), budgetKey("test-bucket")).Int64()
+	bal, _ := client.rdb.Get(context.Background(), budgetKey("default", "test-bucket")).Int64()
 	if bal != 0 {
 		t.Fatalf("balance = %d, want 0", bal)
 	}

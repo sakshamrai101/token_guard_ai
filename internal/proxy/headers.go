@@ -20,6 +20,7 @@ var hopByHopHeaders = map[string]struct{}{
 var internalHeaders = map[string]struct{}{
 	"x-budget-bucket-id": {},
 	"x-request-id":       {},
+	"x-tokenguard-key":   {},
 }
 
 func SanitizeRequestHeaders(h http.Header, upstreamHost string) {

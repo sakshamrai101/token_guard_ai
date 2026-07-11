@@ -14,15 +14,13 @@ type PreCheckResult struct {
 	Reserved int64
 }
 
-
 type BudgetChecker interface {
-	Reserve(ctx context.Context, bucketID, requestID string, estimate int64) (PreCheckResult, error)
+	Reserve(ctx context.Context, orgID, bucketID, requestID string, estimate int64) (PreCheckResult, error)
 }
-
 
 type noopChecker struct{}
 
-func (noopChecker) Reserve(_ context.Context, _, _ string, _ int64) (PreCheckResult, error) {
+func (noopChecker) Reserve(_ context.Context, _, _, _ string, _ int64) (PreCheckResult, error) {
 	return PreCheckResult{Allowed: true}, nil
 }
 
@@ -48,7 +46,7 @@ func NewEnforcement(cfg config.Config, checker BudgetChecker, logger *slog.Logge
 	}
 }
 
-func (e *Enforcement) PreCheck(ctx context.Context, bucketID, requestID string, estimate int64) PreCheckResult {
+func (e *Enforcement) PreCheck(ctx context.Context, orgID, bucketID, requestID string, estimate int64) PreCheckResult {
 	if e.mode == config.EnforcementOff {
 		return PreCheckResult{Allowed: true}
 	}
@@ -56,10 +54,11 @@ func (e *Enforcement) PreCheck(ctx context.Context, bucketID, requestID string, 
 	checkCtx, cancel := context.WithTimeout(ctx, e.timeout)
 	defer cancel()
 
-	result, err := e.checker.Reserve(checkCtx, bucketID, requestID, estimate)
+	result, err := e.checker.Reserve(checkCtx, orgID, bucketID, requestID, estimate)
 	if err != nil {
 		e.logger.Warn("budget pre-check failed, fail-open forward",
 			"request_id", requestID,
+			"org_id", orgID,
 			"bucket_id", bucketID,
 			"error", err,
 		)
@@ -69,6 +68,7 @@ func (e *Enforcement) PreCheck(ctx context.Context, bucketID, requestID string, 
 	if checkCtx.Err() == context.DeadlineExceeded {
 		e.logger.Warn("budget pre-check timed out, fail-open forward",
 			"request_id", requestID,
+			"org_id", orgID,
 			"bucket_id", bucketID,
 		)
 		return PreCheckResult{Allowed: true, FailOpen: true}

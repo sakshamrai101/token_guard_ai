@@ -58,8 +58,12 @@ func logUsageEvent(ctx context.Context, logger store.UsageLogger, p settlementPa
 	if logger == nil {
 		return
 	}
+	orgID := p.orgID
+	if orgID == "" {
+		orgID = store.DefaultOrgID
+	}
 	if err := logger.LogUsage(ctx, store.UsageEvent{
-		OrgID:     store.DefaultOrgID,
+		OrgID:     orgID,
 		BucketID:  p.bucketID,
 		RequestID: p.requestID,
 		Reserved:  p.reserved,

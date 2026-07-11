@@ -23,7 +23,7 @@ func newAdminTestServer(t *testing.T, bucketBalance int64) (*httptest.Server, *m
 
 	mr := miniredis.RunT(t)
 	if bucketBalance > 0 {
-		mr.Set("budget:ops-bucket", strconv.FormatInt(bucketBalance, 10))
+		mr.Set("budget:default:ops-bucket", strconv.FormatInt(bucketBalance, 10))
 	}
 
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
@@ -112,7 +112,7 @@ func TestAdminAPIGetSetTopup(t *testing.T) {
 		t.Fatalf("topup balance = %d, want 5500", topupGot.Balance)
 	}
 
-	balStr, err := mr.Get("budget:ops-bucket")
+	balStr, err := mr.Get("budget:default:ops-bucket")
 	if err != nil {
 		t.Fatalf("redis get: %v", err)
 	}

@@ -42,15 +42,15 @@ func TestAdminRoutesNotProxied(t *testing.T) {
 
 type adminStubStore struct{}
 
-func (adminStubStore) GetBalance(_ context.Context, _ string) (int64, error) {
+func (adminStubStore) GetBalance(_ context.Context, _, _ string) (int64, error) {
 	return 42, nil
 }
 
-func (adminStubStore) SetBalance(_ context.Context, _ string, balance int64) (int64, error) {
+func (adminStubStore) SetBalance(_ context.Context, _, _ string, balance int64) (int64, error) {
 	return balance, nil
 }
 
-func (adminStubStore) Topup(_ context.Context, _ string, amount int64) (int64, error) {
+func (adminStubStore) Topup(_ context.Context, _, _ string, amount int64) (int64, error) {
 	return amount, nil
 }
 

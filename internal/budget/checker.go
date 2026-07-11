@@ -18,8 +18,7 @@ func NewRedisBudgetChecker(client *Client, metrics *Metrics) *RedisBudgetChecker
 	return &RedisBudgetChecker{client: client, metrics: metrics}
 }
 
-
-func (c *RedisBudgetChecker) Reserve(ctx context.Context, bucketID, requestID string, estimate int64) (ReserveResult, error) {
+func (c *RedisBudgetChecker) Reserve(ctx context.Context, orgID, bucketID, requestID string, estimate int64) (ReserveResult, error) {
 	start := time.Now()
 	defer func() {
 		c.metrics.RecordReserve(time.Since(start))
@@ -31,12 +30,15 @@ func (c *RedisBudgetChecker) Reserve(ctx context.Context, bucketID, requestID st
 	if requestID == "" {
 		return ReserveResult{}, fmt.Errorf("empty request_id")
 	}
+	if orgID == "" {
+		orgID = "default"
+	}
 
 	ttlSec := int64(c.client.ttl.Seconds())
 	res, err := c.client.rdb.EvalSha(ctx, c.client.reserveSHA, []string{
-		budgetKey(bucketID),
+		budgetKey(orgID, bucketID),
 		reservationKey(requestID),
-	}, estimate, ttlSec, bucketID).Result()
+	}, estimate, ttlSec, scopedBucketID(orgID, bucketID)).Result()
 	if err != nil {
 		return ReserveResult{}, err
 	}

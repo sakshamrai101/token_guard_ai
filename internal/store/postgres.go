@@ -35,6 +35,10 @@ func OpenPostgres(databaseURL string) (*PostgresUsageStore, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if err := s.EnsureOrgSchema(ctx); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	return s, nil
 }
 
@@ -53,6 +57,8 @@ CREATE TABLE IF NOT EXISTS usage_events (
 );
 CREATE INDEX IF NOT EXISTS usage_events_bucket_created_idx
     ON usage_events (bucket_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS usage_events_org_created_idx
+    ON usage_events (org_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS usage_events_request_id_idx
     ON usage_events (request_id);
 `

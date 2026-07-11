@@ -121,7 +121,7 @@ func TestSettleExactReservedDeletesReservation(t *testing.T) {
 	_, client := setupTestClient(t, 5000)
 	checker := NewRedisBudgetChecker(client, nil)
 
-	_, err := checker.Reserve(context.Background(), "test-bucket", "req-exact", 1000)
+	_, err := checker.Reserve(context.Background(), "default", "test-bucket", "req-exact", 1000)
 	if err != nil {
 		t.Fatalf("Reserve: %v", err)
 	}
@@ -129,7 +129,7 @@ func TestSettleExactReservedDeletesReservation(t *testing.T) {
 		t.Fatalf("Settle: %v", err)
 	}
 
-	bal, _ := client.rdb.Get(context.Background(), budgetKey("test-bucket")).Int64()
+	bal, _ := client.rdb.Get(context.Background(), budgetKey("default", "test-bucket")).Int64()
 	if bal != 4000 {
 		t.Fatalf("balance = %d, want 4000", bal)
 	}

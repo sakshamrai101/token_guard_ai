@@ -22,7 +22,7 @@ import (
 
 func TestSettleWritesUsageEventAndDumpReturnsIt(t *testing.T) {
 	mr := miniredis.RunT(t)
-	mr.Set("budget:test-bucket", "5000")
+	mr.Set("budget:default:test-bucket", "5000")
 
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	client, err := budget.NewClientFromRedis(rdb, 5*time.Minute)
@@ -133,7 +133,7 @@ func TestSettleWritesUsageEventAndDumpReturnsIt(t *testing.T) {
 		t.Fatal("expected at least one bucket in list")
 	}
 
-	balStr, _ := mr.Get("budget:test-bucket")
+	balStr, _ := mr.Get("budget:default:test-bucket")
 	bal, _ := strconv.ParseInt(balStr, 10, 64)
 	if bal != 4800 {
 		t.Fatalf("balance = %d, want 4800", bal)
@@ -142,7 +142,7 @@ func TestSettleWritesUsageEventAndDumpReturnsIt(t *testing.T) {
 
 func TestReleaseWritesUsageEvent(t *testing.T) {
 	mr := miniredis.RunT(t)
-	mr.Set("budget:test-bucket", "5000")
+	mr.Set("budget:default:test-bucket", "5000")
 
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	client, err := budget.NewClientFromRedis(rdb, 5*time.Minute)

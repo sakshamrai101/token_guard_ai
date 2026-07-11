@@ -7,7 +7,7 @@ import (
 )
 
 type budgetReserve interface {
-	Reserve(ctx context.Context, bucketID, requestID string, estimate int64) (budget.ReserveResult, error)
+	Reserve(ctx context.Context, orgID, bucketID, requestID string, estimate int64) (budget.ReserveResult, error)
 }
 
 type budgetCheckerBridge struct {
@@ -18,7 +18,7 @@ func NewBudgetCheckerBridge(inner budgetReserve) BudgetChecker {
 	return budgetCheckerBridge{inner: inner}
 }
 
-func (b budgetCheckerBridge) Reserve(ctx context.Context, bucketID, requestID string, estimate int64) (PreCheckResult, error) {
-	r, err := b.inner.Reserve(ctx, bucketID, requestID, estimate)
+func (b budgetCheckerBridge) Reserve(ctx context.Context, orgID, bucketID, requestID string, estimate int64) (PreCheckResult, error) {
+	r, err := b.inner.Reserve(ctx, orgID, bucketID, requestID, estimate)
 	return PreCheckResult{Allowed: r.Allowed, Reserved: r.Reserved}, err
 }

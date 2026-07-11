@@ -20,9 +20,11 @@ type stubBudgetChecker struct {
 	lastEst  int64
 	lastReq  string
 	lastBuck string
+	lastOrg  string
 }
 
-func (s *stubBudgetChecker) Reserve(_ context.Context, bucketID, requestID string, estimate int64) (PreCheckResult, error) {
+func (s *stubBudgetChecker) Reserve(_ context.Context, orgID, bucketID, requestID string, estimate int64) (PreCheckResult, error) {
+	s.lastOrg = orgID
 	s.lastBuck = bucketID
 	s.lastReq = requestID
 	s.lastEst = estimate

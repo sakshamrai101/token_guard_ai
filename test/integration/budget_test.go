@@ -30,7 +30,7 @@ func newBudgetTestStack(t *testing.T, mode config.EnforcementMode, bucketBalance
 
 	mr := miniredis.RunT(t)
 	if bucketBalance > 0 {
-		mr.Set("budget:test-bucket", strconv.FormatInt(bucketBalance, 10))
+		mr.Set("budget:default:test-bucket", strconv.FormatInt(bucketBalance, 10))
 	}
 
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
@@ -179,7 +179,7 @@ func TestReleaseBudgetOnUpstream4xx(t *testing.T) {
 		t.Fatalf("status = %d, want 400", resp.StatusCode)
 	}
 
-	balStr, err := stack.mr.Get("budget:test-bucket")
+	balStr, err := stack.mr.Get("budget:default:test-bucket")
 	if err != nil {
 		t.Fatalf("get balance: %v", err)
 	}
@@ -217,7 +217,7 @@ func TestStreamingMissingUsageSettlesAtReserved(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	waitForBalance(t, stack.mr, "budget:test-bucket", 4388, 2*time.Second)
+	waitForBalance(t, stack.mr, "budget:default:test-bucket", 4388, 2*time.Second)
 	waitForNoReservation(t, stack.mr, "reservation:req-hold", 2*time.Second)
 }
 
@@ -284,7 +284,7 @@ func TestReserveUsesParsedEstimate(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	balStr, err := stack.mr.Get("budget:test-bucket")
+	balStr, err := stack.mr.Get("budget:default:test-bucket")
 	if err != nil {
 		t.Fatalf("get balance: %v", err)
 	}
@@ -324,7 +324,7 @@ func TestFailOpenMissingBucketForwards(t *testing.T) {
 		t.Fatalf("upstream called %d times, want 1", upstreamCalls.Load())
 	}
 
-	balStr, err := stack.mr.Get("budget:test-bucket")
+	balStr, err := stack.mr.Get("budget:default:test-bucket")
 	if err != nil {
 		t.Fatalf("get balance: %v", err)
 	}
@@ -359,7 +359,7 @@ func TestReleaseBudgetOnUpstream5xx(t *testing.T) {
 		t.Fatalf("status = %d, want 500", resp.StatusCode)
 	}
 
-	balStr, err := stack.mr.Get("budget:test-bucket")
+	balStr, err := stack.mr.Get("budget:default:test-bucket")
 	if err != nil {
 		t.Fatalf("get balance: %v", err)
 	}
@@ -393,7 +393,7 @@ func TestNonStreamingSettlesToActualUsage(t *testing.T) {
 		t.Fatalf("read body: %v", err)
 	}
 
-	balStr, err := stack.mr.Get("budget:test-bucket")
+	balStr, err := stack.mr.Get("budget:default:test-bucket")
 	if err != nil {
 		t.Fatalf("get balance: %v", err)
 	}
@@ -433,7 +433,7 @@ func TestSettleRefundsWhenActualLessThanReserved(t *testing.T) {
 		t.Fatalf("read body: %v", err)
 	}
 
-	balStr, err := stack.mr.Get("budget:test-bucket")
+	balStr, err := stack.mr.Get("budget:default:test-bucket")
 	if err != nil {
 		t.Fatalf("get balance: %v", err)
 	}
@@ -494,7 +494,7 @@ func TestStreamingSettlesToActualUsage(t *testing.T) {
 		t.Fatalf("read stream: %v", err)
 	}
 
-	waitForBalance(t, stack.mr, "budget:test-bucket", 4800, 2*time.Second)
+	waitForBalance(t, stack.mr, "budget:default:test-bucket", 4800, 2*time.Second)
 	if stack.mr.Exists("reservation:req-stream-settle") {
 		t.Fatal("reservation should be deleted after stream settle")
 	}

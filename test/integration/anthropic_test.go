@@ -23,7 +23,7 @@ func newProviderBudgetTestStack(t *testing.T, upstreamHost string, mode config.E
 
 	mr := miniredis.RunT(t)
 	if bucketBalance > 0 {
-		mr.Set("budget:test-bucket", strconv.FormatInt(bucketBalance, 10))
+		mr.Set("budget:default:test-bucket", strconv.FormatInt(bucketBalance, 10))
 	}
 
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
@@ -93,7 +93,7 @@ func TestAnthropicNonStreamingSettlesToActualUsage(t *testing.T) {
 		t.Fatalf("read body: %v", err)
 	}
 
-	balStr, err := stack.mr.Get("budget:test-bucket")
+	balStr, err := stack.mr.Get("budget:default:test-bucket")
 	if err != nil {
 		t.Fatalf("get balance: %v", err)
 	}
@@ -142,7 +142,7 @@ func TestAnthropicStreamingSettlesToActualUsage(t *testing.T) {
 		t.Fatalf("read stream: %v", err)
 	}
 
-	waitForBalance(t, stack.mr, "budget:test-bucket", 4800, 2*time.Second)
+	waitForBalance(t, stack.mr, "budget:default:test-bucket", 4800, 2*time.Second)
 	if stack.mr.Exists("reservation:req-anthropic-stream-settle") {
 		t.Fatal("reservation should be deleted after stream settle")
 	}

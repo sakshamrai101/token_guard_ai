@@ -8,7 +8,7 @@ import (
 func TestSetBalance(t *testing.T) {
 	_, client := setupTestClient(t, 1000)
 
-	balance, err := client.SetBalance(context.Background(), "test-bucket", 5000)
+	balance, err := client.SetBalance(context.Background(), "default", "test-bucket", 5000)
 	if err != nil {
 		t.Fatalf("SetBalance: %v", err)
 	}
@@ -16,7 +16,7 @@ func TestSetBalance(t *testing.T) {
 		t.Fatalf("balance = %d, want 5000", balance)
 	}
 
-	got, err := client.GetBalance(context.Background(), "test-bucket")
+	got, err := client.GetBalance(context.Background(), "default", "test-bucket")
 	if err != nil {
 		t.Fatalf("GetBalance: %v", err)
 	}
@@ -28,7 +28,7 @@ func TestSetBalance(t *testing.T) {
 func TestTopupBalance(t *testing.T) {
 	_, client := setupTestClient(t, 1000)
 
-	balance, err := client.TopupBalance(context.Background(), "test-bucket", 250)
+	balance, err := client.TopupBalance(context.Background(), "default", "test-bucket", 250)
 	if err != nil {
 		t.Fatalf("TopupBalance: %v", err)
 	}
@@ -40,7 +40,7 @@ func TestTopupBalance(t *testing.T) {
 func TestGetBalanceMissingBucketReturnsZero(t *testing.T) {
 	_, client := setupTestClient(t, 0)
 
-	balance, err := client.GetBalance(context.Background(), "missing-bucket")
+	balance, err := client.GetBalance(context.Background(), "default", "missing-bucket")
 	if err != nil {
 		t.Fatalf("GetBalance: %v", err)
 	}
@@ -52,7 +52,7 @@ func TestGetBalanceMissingBucketReturnsZero(t *testing.T) {
 func TestTopupBalanceRejectsZeroAmount(t *testing.T) {
 	_, client := setupTestClient(t, 1000)
 
-	_, err := client.TopupBalance(context.Background(), "test-bucket", 0)
+	_, err := client.TopupBalance(context.Background(), "default", "test-bucket", 0)
 	if err == nil {
 		t.Fatal("expected error for zero topup amount")
 	}

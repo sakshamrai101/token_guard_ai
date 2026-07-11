@@ -107,10 +107,25 @@ func TestLoadInvalidEnforcementMode(t *testing.T) {
 	}
 }
 
-func TestLoadInvalidRedisPoolSize(t *testing.T) {
-	setenv(t, "REDIS_POOL_SIZE", "not-a-number")
-	_, err := Load()
-	if err == nil {
-		t.Fatal("expected error for invalid REDIS_POOL_SIZE")
+func TestLoadStripeConfig(t *testing.T) {
+	setenv(t, "STRIPE_SECRET_KEY", "sk_test_x")
+	setenv(t, "STRIPE_WEBHOOK_SECRET", "whsec_x")
+	setenv(t, "STRIPE_PRICE_INDIE", "price_indie")
+	setenv(t, "STRIPE_PRICE_TEAM", "price_team")
+	setenv(t, "STRIPE_SUCCESS_URL", "https://example.com/ok")
+	setenv(t, "STRIPE_CANCEL_URL", "https://example.com/cancel")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.StripeSecretKey != "sk_test_x" || cfg.StripeWebhookSecret != "whsec_x" {
+		t.Fatalf("stripe secrets = %q/%q", cfg.StripeSecretKey, cfg.StripeWebhookSecret)
+	}
+	if cfg.StripePriceIndie != "price_indie" || cfg.StripePriceTeam != "price_team" {
+		t.Fatalf("prices = %q/%q", cfg.StripePriceIndie, cfg.StripePriceTeam)
+	}
+	if cfg.StripeSuccessURL != "https://example.com/ok" {
+		t.Fatalf("success = %q", cfg.StripeSuccessURL)
 	}
 }

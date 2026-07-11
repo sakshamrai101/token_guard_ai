@@ -10,10 +10,10 @@ func TestListBucketsAndReservations(t *testing.T) {
 	ctx := context.Background()
 
 	checker := NewRedisBudgetChecker(client, nil)
-	if _, err := checker.Reserve(ctx, "test-bucket", "req-list-1", 100); err != nil {
+	if _, err := checker.Reserve(ctx, "default", "test-bucket", "req-list-1", 100); err != nil {
 		t.Fatalf("Reserve: %v", err)
 	}
-	if _, err := client.SetBalance(ctx, "other-bucket", 200); err != nil {
+	if _, err := client.SetBalance(ctx, "default", "other-bucket", 200); err != nil {
 		t.Fatalf("SetBalance: %v", err)
 	}
 

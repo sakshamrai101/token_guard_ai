@@ -24,7 +24,7 @@ func TestConcurrentRequestsCannotOverspendWithSettlement(t *testing.T) {
 	responseBody := `{"choices":[],"usage":{"prompt_tokens":50,"completion_tokens":150,"total_tokens":200}}`
 
 	mr := miniredis.RunT(t)
-	mr.Set("budget:test-bucket", "5000")
+	mr.Set("budget:default:test-bucket", "5000")
 
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	client, err := budget.NewClientFromRedis(rdb, 5*time.Minute)
@@ -99,7 +99,7 @@ func TestConcurrentRequestsCannotOverspendWithSettlement(t *testing.T) {
 	}
 	wg.Wait()
 
-	waitForBalance(t, mr, "budget:test-bucket", 1000, 3*time.Second)
+	waitForBalance(t, mr, "budget:default:test-bucket", 1000, 3*time.Second)
 
 	denyBody := []byte(`{"model":"gpt-4o","max_tokens":1024,"messages":[{"role":"user","content":"hi"}]}`)
 	denyReq, err := http.NewRequest(http.MethodPost, ts.URL+"/v1/chat/completions", bytes.NewReader(denyBody))
@@ -123,7 +123,7 @@ func TestConcurrentRequestsCannotOverspendWithSettlement(t *testing.T) {
 
 func TestGoroutineLeakOnAbortedStreams(t *testing.T) {
 	mr := miniredis.RunT(t)
-	mr.Set("budget:test-bucket", "10000000")
+	mr.Set("budget:default:test-bucket", "10000000")
 	rdb := redis.NewClient(&redis.Options{
 		Addr:         mr.Addr(),
 		PoolSize:     4,

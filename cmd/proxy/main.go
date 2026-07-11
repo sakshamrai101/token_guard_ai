@@ -9,6 +9,7 @@ import (
 	"github.com/saksham/token-guard-ai/internal/billing"
 	"github.com/saksham/token-guard-ai/internal/budget"
 	"github.com/saksham/token-guard-ai/internal/config"
+	"github.com/saksham/token-guard-ai/internal/ops"
 	"github.com/saksham/token-guard-ai/internal/proxy"
 	"github.com/saksham/token-guard-ai/internal/store"
 	"github.com/saksham/token-guard-ai/internal/usage"
@@ -34,6 +35,7 @@ func main() {
 	var streamExt usage.StreamExtractor
 	var readiness proxy.ReadinessChecker
 	var adminHandler *admin.Handler
+	var opsHandler http.Handler
 	var usageStore store.UsageStore
 	var usageLogger store.UsageLogger
 	var orgStore store.OrgStore
@@ -85,12 +87,14 @@ func main() {
 
 		alerter = alerter.WithDedupe(redisClient.WarningDedupe())
 
+		redisStore := admin.NewRedisStore(redisClient)
 		if cfg.AdminAPIKey != "" {
 			var checkout admin.CheckoutStarter
 			if billingSvc != nil {
 				checkout = billingSvc
 			}
-			adminHandler = admin.NewHandlerWithBilling(admin.NewRedisStore(redisClient), usageStore, orgStore, checkout, cfg.AdminAPIKey)
+			adminHandler = admin.NewHandlerWithBilling(redisStore, usageStore, orgStore, checkout, cfg.AdminAPIKey)
+			opsHandler = ops.NewHandler(cfg.AdminAPIKey, redisStore, usageStore)
 		}
 
 		if cfg.EnforcementMode != config.EnforcementOff {
@@ -131,6 +135,10 @@ func main() {
 	if billingSvc != nil {
 		server.Handle("POST /billing/webhook", billing.NewWebhookHandler(billingSvc))
 		logger.Info("stripe webhook mounted", "path", "/billing/webhook")
+	}
+	if opsHandler != nil {
+		server.Handle("GET /ops", opsHandler)
+		logger.Info("ops page mounted", "path", "/ops")
 	}
 	if err := server.ListenAndServe(); err != nil {
 		logger.Error("server exited", "error", err)

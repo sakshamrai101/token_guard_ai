@@ -40,8 +40,10 @@ CREATE TABLE IF NOT EXISTS buckets (
 	if _, err := s.db.ExecContext(ctx, q); err != nil {
 		return fmt.Errorf("ensure org schema: %w", err)
 	}
-	// Migrate existing installs that predate Stripe columns.
+	// Migrate existing installs that predate Stripe / slack columns.
 	alters := []string{
+		`ALTER TABLE orgs ADD COLUMN IF NOT EXISTS slack_webhook_url TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE orgs ADD COLUMN IF NOT EXISTS default_bucket_id TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE orgs ADD COLUMN IF NOT EXISTS stripe_customer_id TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE orgs ADD COLUMN IF NOT EXISTS stripe_subscription_id TEXT NOT NULL DEFAULT ''`,
 		`CREATE INDEX IF NOT EXISTS orgs_stripe_subscription_id_idx ON orgs (stripe_subscription_id)`,

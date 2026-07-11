@@ -40,6 +40,38 @@ func TestAdminRoutesNotProxied(t *testing.T) {
 	}
 }
 
+func TestOpsRouteNotProxied(t *testing.T) {
+	var proxied bool
+	proxyHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxied = true
+		w.WriteHeader(http.StatusOK)
+	})
+	cfg := config.Config{}
+	server := NewServer(cfg, proxyHandler, nil, nil, nil)
+
+	ops := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("<h1>TokenGuard Ops</h1><h2>Buckets</h2>"))
+	})
+	server.Handle("GET /ops", ops)
+
+	ts := httptest.NewServer(server)
+	t.Cleanup(ts.Close)
+
+	resp, err := http.Get(ts.URL + "/ops")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	defer resp.Body.Close()
+	if proxied {
+		t.Fatal("/ops was handled by proxy catch-all")
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+}
+
 type adminStubStore struct{}
 
 func (adminStubStore) GetBalance(_ context.Context, _, _ string) (int64, error) {

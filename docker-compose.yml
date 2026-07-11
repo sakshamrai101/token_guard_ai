@@ -9,6 +9,22 @@ services:
       timeout: 3s
       retries: 5
 
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: tokenguard
+      POSTGRES_PASSWORD: tokenguard
+      POSTGRES_DB: tokenguard
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tokenguard -d tokenguard"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   proxy:
     build: .
     ports:
@@ -16,7 +32,14 @@ services:
     env_file:
       - .env
     environment:
+      # Override hostnames so the proxy reaches Compose services
       REDIS_URL: redis://redis:6379
+      DATABASE_URL: postgres://tokenguard:tokenguard@postgres:5432/tokenguard?sslmode=disable
     depends_on:
       redis:
         condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:

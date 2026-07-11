@@ -57,6 +57,8 @@ func (s *Server) routes() {
 	if s.admin != nil {
 		s.mux.Handle("/admin/", s.admin)
 	}
+	// /ops and /billing/* are registered via Handle() before ListenAndServe;
+	// more-specific patterns win over the catch-all below.
 	s.mux.Handle("/", s.handler)
 }
 

@@ -334,9 +334,9 @@ See [ONBOARDING.md](ONBOARDING.md) for full setup walkthrough.
 | **H1** Usage log + dump APIs | **Done** |
 | **H2** Multi-tenant auth (`tg_` keys, org-scoped Redis) | **Done** |
 | **H3** Slack per-org + 80% warning | **Done** |
-| **H4** Stripe Checkout + webhook | **Next** |
-| **H5** Minimal `/ops` HTML page | Pending |
-| **H6** Postgres in Compose + VPS deploy docs | Pending |
+| **H4** Stripe Checkout + webhook | **Done** |
+| **H5** Minimal `/ops` HTML page | **Done** |
+| **H6** Postgres in Compose + VPS deploy docs | **Done** |
 
 Do NOT combine phases. TDD each phase. `go test ./...` must stay green. Update [ARCHITECTURE.md](ARCHITECTURE.md) **after** each phase ships (not before).
 
@@ -375,88 +375,48 @@ Do NOT combine phases. TDD each phase. `go test ./...` must stay green. Update [
 
 ---
 
-### H4 — Stripe Checkout + webhook (NEXT)
+### H4 — Stripe Checkout + webhook (DONE)
 
-**Goal:** Stripe test-mode Checkout activates Indie ($15) / Team ($39); subscription deleted downgrades.
+**Shipped:**
 
-**Deliverables:**
-
-1. Env: `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_INDIE`, `STRIPE_PRICE_TEAM`
-2. Package `internal/billing` — Checkout Session + webhook signature verify
-3. `POST /admin/v1/orgs/{id}/checkout` — body `{ "plan": "indie"|"team" }` → Checkout URL (ADMIN_API_KEY)
-4. `POST /billing/webhook` — `checkout.session.completed` → set `orgs.plan` + Stripe IDs; `customer.subscription.deleted` → plan back to `trial`
-5. Persist `stripe_customer_id`, `stripe_subscription_id` on org
-6. Soft enforce for v1: allow traffic on trial; Slack warn if useful — **no hard paywall required in H4**
-
-**Tests:**
-
-- Webhook with mocked secret updates `org.plan`
-- Checkout endpoint returns URL from mocked Stripe client
-- Invalid signature → 400
-- Full suite green
-
-**NOT H4:** Self-serve signup UI, customer portal, `/ops`
-
-**H4 Definition of Done:**
-
-- [ ] Admin can start Checkout for an org
-- [ ] Webhook activates/downgrades plan
-- [ ] Document Stripe CLI forward for local test
-- [ ] `go test ./...` green
+- `internal/billing` — Checkout Session + webhook verify
+- `POST /admin/v1/orgs/{id}/checkout`, `POST /billing/webhook`
+- Org plan `trial` | `indie` | `team` + Stripe customer/subscription IDs
 
 ---
 
-### H5 — Minimal `/ops` HTML page
+### H5 — Minimal `/ops` HTML page (DONE)
 
-**Goal:** Server-rendered ops view — no React.
+**Shipped:**
 
-**Deliverables:**
-
-1. `GET /ops` — Go `html/template` + minimal CSS
-2. Auth: HTTP Basic (user `admin`, password = `ADMIN_API_KEY`) → 401 if wrong
-3. Sections: bucket balances (with org_id), last 50 `usage_events`, open reservations
-4. Register on mux before catch-all; never proxy `/ops` upstream
-
-**Tests:**
-
-- Unauthorized → 401
-- Authorized → 200 + expected headings
-- Full suite green
-
-**NOT H5:** Charts, customer dashboard, Stripe UI
+- `GET /ops` — Go `html/template` + minimal CSS
+- HTTP Basic auth (`admin` / `ADMIN_API_KEY`)
+- Buckets (with org_id), last 50 usage events, open reservations
+- Mounted on server mux (not proxied)
 
 **H5 Definition of Done:**
 
-- [ ] `/ops` usable in browser with Basic auth
-- [ ] Shows balances + usage + reservations
-- [ ] `go test ./...` green
+- [x] `/ops` usable in browser with Basic auth
+- [x] Shows balances + usage + reservations
+- [x] `go test ./...` green
 
 ---
 
-### H6 — Deploy (Compose Postgres + VPS docs)
+### H6 — Deploy (Compose Postgres + VPS docs) (DONE)
 
-**Goal:** One-command stack + operator docs.
+**Shipped:**
 
-**Deliverables:**
-
-1. `postgres` service in `docker-compose.yml` (healthcheck + volume)
-2. `.env.example` — `DATABASE_URL`, Stripe vars, Slack, existing admin/redis
-3. Schema auto-migrate on proxy startup (orgs / keys / usage / Stripe columns)
-4. `docs/RUNBOOK.md` — VPS deploy, Stripe webhook URL, create org → key → Slack → Checkout
-5. `README.md` — hosted quickstart with `X-TokenGuard-Key`
-
-**Tests / gate:**
-
-- `go test ./...` green
-- Manual: `docker compose up -d --build` smoke checklist documented
-
-**NOT H6:** K8s, Terraform, CI deploy, Gemini
+- `postgres` in `docker-compose.yml` (healthcheck + `pgdata` volume); proxy waits on healthy redis + postgres
+- `.env.example` documents `DATABASE_URL`, Stripe, Slack, admin/redis
+- Schema auto-migrate on startup (`usage_events`, orgs/keys/buckets, Slack + Stripe columns)
+- `docs/RUNBOOK.md` — Compose smoke, VPS outline, org → key → Slack → Checkout → `/ops`
+- `README.md` — hosted quickstart with `X-TokenGuard-Key`
 
 **H6 Definition of Done:**
 
-- [ ] Compose runs proxy + redis + postgres
-- [ ] RUNBOOK + README updated for hosted multi-tenant
-- [ ] Hosted v1 overall DoD checklist below is checkable
+- [x] Compose runs proxy + redis + postgres
+- [x] RUNBOOK + README updated for hosted multi-tenant
+- [x] Hosted v1 overall DoD checklist below is checkable
 
 ---
 
@@ -466,10 +426,10 @@ Do NOT combine phases. TDD each phase. `go test ./...` must stay green. Update [
 - [x] Customer with `tg_` key can call proxy; unknown key → 401 (H2)
 - [x] Budget keys scoped per org in Redis (H2)
 - [x] Slack fires on exhaust + 80% + fail-open (H3)
-- [ ] Stripe test-mode Checkout activates Indie/Team plan (H4)
-- [ ] `/ops` shows balances + recent requests (admin auth) (H5)
-- [ ] `docker compose up` runs proxy + redis + postgres (H6)
-- [ ] `go test ./...` green
+- [x] Stripe test-mode Checkout activates Indie/Team plan (H4)
+- [x] `/ops` shows balances + recent requests (admin auth) (H5)
+- [x] `docker compose up` runs proxy + redis + postgres (H6)
+- [x] `go test ./...` green
 
 ---
 

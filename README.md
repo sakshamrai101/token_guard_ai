@@ -2,7 +2,7 @@
 
 A drop-in LLM API proxy that enforces per-bucket token budgets in real time. Think of it as a **circuit breaker for your OpenAI/Anthropic API key** — block runaway spend before it hits your invoice, without taking down your app when Redis hiccups.
 
-Built for indie devs and small AI startups who want set-and-forget abuse protection.
+Built for indie devs and small AI startups who want set-and-forget abuse protection. Also ships as a **hosted multi-tenant** stack (Postgres orgs + `tg_` keys + Stripe + Slack + `/ops`).
 
 ## What it does
 
@@ -12,16 +12,14 @@ Built for indie devs and small AI startups who want set-and-forget abuse protect
 - **429** when a bucket can't cover the estimated cost (`enforce` mode)
 - **Fail-open** when Redis is unreachable — LLM traffic still flows
 - **Release** (full refund) on upstream 4xx/5xx
-- **Admin API** for bucket balance get/set/topup (no `redis-cli`)
-- Parses `max_tokens` from the request body to estimate reservation size
+- **Admin API** for buckets, orgs, keys, usage dumps
+- **Hosted mode:** `X-TokenGuard-Key`, org-scoped Redis budgets, Stripe plans, Slack alerts, `/ops`
 
 Provider routing is by `UPSTREAM_HOST`: `api.openai.com` → OpenAI extractors; `api.anthropic.com` → Anthropic extractors. Run one proxy instance per provider.
 
-See [PLAN.md](PLAN.md), [ARCHITECTURE.md](ARCHITECTURE.md), [ONBOARDING.md](ONBOARDING.md), and [docs/RUNBOOK.md](docs/RUNBOOK.md) for rollout and ops.
+See [PLAN.md](PLAN.md), [ARCHITECTURE.md](ARCHITECTURE.md), [ONBOARDING.md](ONBOARDING.md), and [docs/RUNBOOK.md](docs/RUNBOOK.md).
 
-**Next (Hosted Product v1):** multi-tenant API keys, Stripe ($15/$39), Slack alerts, usage dump, minimal `/ops` page — see PLAN.md **Hosted Product v1**.
-
-## Docker quick start
+## Docker quick start (proxy + Redis + Postgres)
 
 **Requirements:** Docker + Docker Compose
 
@@ -33,26 +31,55 @@ docker compose up -d --build
 
 curl http://localhost:8080/healthz   # {"status":"ok"}
 curl http://localhost:8080/readyz    # {"status":"ready"}
+docker compose ps                    # proxy, redis, postgres
 ```
 
-### Seed a bucket (admin API)
+Compose injects `DATABASE_URL` and `REDIS_URL` for in-network hostnames. Schema auto-migrates on startup. With Postgres enabled, **LLM calls require `X-TokenGuard-Key`**.
+
+### Hosted quickstart (org + key + LLM call)
 
 ```bash
 export ADMIN_API_KEY=change-me-to-a-long-random-secret   # match .env
 
+# 1. Create org
+ORG_ID=$(curl -s -X POST http://localhost:8080/admin/v1/orgs \
+  -H "Authorization: Bearer $ADMIN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Acme"}' | jq -r .id)
+
+# 2. Mint TokenGuard key (store raw key once)
+TG_KEY=$(curl -s -X POST http://localhost:8080/admin/v1/orgs/$ORG_ID/keys \
+  -H "Authorization: Bearer $ADMIN_API_KEY" | jq -r .key)
+
+# 3. Seed budget for this org
+curl -s -X PUT "http://localhost:8080/admin/v1/buckets/my-app?org_id=$ORG_ID" \
+  -H "Authorization: Bearer $ADMIN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"balance": 50000}'
+
+# 4. Call the proxy (provider key + TokenGuard key)
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -H "X-TokenGuard-Key: $TG_KEY" \
+  -H "X-Budget-Bucket-Id: my-app" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-4o-mini","max_tokens":50,"messages":[{"role":"user","content":"hi"}]}'
+```
+
+**Ops UI:** [http://localhost:8080/ops](http://localhost:8080/ops) — Basic auth user `admin`, password = `ADMIN_API_KEY`.
+
+Full operator flow (Slack, Stripe Checkout, VPS): [docs/RUNBOOK.md](docs/RUNBOOK.md).
+
+### Self-hosted without Postgres
+
+Leave `DATABASE_URL` empty (and remove Compose `DATABASE_URL` override if you customize compose). TokenGuard auth is off; seed buckets without `org_id` (defaults to `default`).
+
+```bash
 curl -X PUT http://localhost:8080/admin/v1/buckets/my-app \
   -H "Authorization: Bearer $ADMIN_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"balance": 50000}'
 
-curl http://localhost:8080/admin/v1/buckets/my-app \
-  -H "Authorization: Bearer $ADMIN_API_KEY"
-# {"bucket_id":"my-app","balance":50000}
-```
-
-### Proxy a request
-
-```bash
 curl -X POST http://localhost:8080/v1/chat/completions \
   -H "Authorization: Bearer $OPENAI_API_KEY" \
   -H "Content-Type: application/json" \
@@ -62,16 +89,21 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 
 After the response completes, the bucket balance is reconciled to actual `usage.total_tokens` (OpenAI) or `input_tokens + output_tokens` (Anthropic).
 
-## Local development (without Docker)
+## Local development (without Docker Compose)
 
-**Requirements:** Go 1.22+, Redis 7+
+**Requirements:** Go 1.22+, Redis 7+, optional Postgres 16+
 
 ```bash
-docker run --rm -p 6379:6379 redis:7
+docker run --rm -p 6379:6379 redis:7-alpine
+# optional multi-tenant:
+docker run --rm -p 5432:5432 \
+  -e POSTGRES_USER=tokenguard -e POSTGRES_PASSWORD=tokenguard -e POSTGRES_DB=tokenguard \
+  postgres:16-alpine
 
 export ADMIN_API_KEY=dev-secret
 export ENFORCEMENT_MODE=shadow
 export REDIS_URL=redis://localhost:6379
+export DATABASE_URL='postgres://tokenguard:tokenguard@localhost:5432/tokenguard?sslmode=disable'
 
 go run ./cmd/proxy/
 ```
@@ -80,10 +112,11 @@ go run ./cmd/proxy/
 
 | Header | Purpose |
 |--------|---------|
+| `X-TokenGuard-Key` | Hosted auth (`tg_…`); required when `DATABASE_URL` is set |
 | `X-Budget-Bucket-Id` | Bucket to charge (gateway-injected in prod) |
 | `X-Request-Id` | Idempotency key (auto-generated UUID if omitted) |
 
-Do not trust client-supplied bucket IDs in production — inject at your gateway.
+Do not trust client-supplied bucket IDs in production — inject at your gateway. Never put the TokenGuard key in the provider `Authorization` header.
 
 ## Enforcement modes
 
@@ -101,17 +134,14 @@ Requires `Authorization: Bearer $ADMIN_API_KEY`. Routes are **not** proxied upst
 
 | Method | Path | Body |
 |--------|------|------|
-| GET | `/admin/v1/buckets/{id}` | — |
-| PUT | `/admin/v1/buckets/{id}` | `{"balance": N}` |
-| POST | `/admin/v1/buckets/{id}/topup` | `{"amount": N}` |
-
-```bash
-# Top up
-curl -X POST http://localhost:8080/admin/v1/buckets/my-app/topup \
-  -H "Authorization: Bearer $ADMIN_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"amount": 10000}'
-```
+| GET | `/admin/v1/buckets/{id}?org_id=` | — |
+| PUT | `/admin/v1/buckets/{id}?org_id=` | `{"balance": N}` |
+| POST | `/admin/v1/buckets/{id}/topup?org_id=` | `{"amount": N}` |
+| GET | `/admin/v1/usage`, `/buckets`, `/reservations` | — |
+| POST | `/admin/v1/orgs` | `{"name":"…"}` |
+| POST | `/admin/v1/orgs/{id}/keys` | — (returns raw `tg_` once) |
+| PATCH | `/admin/v1/orgs/{id}` | `{"slack_webhook_url":"…"}` |
+| POST | `/admin/v1/orgs/{id}/checkout` | `{"plan":"indie\|team"}` |
 
 ## Settlement behavior
 
@@ -134,17 +164,22 @@ See [.env.example](.env.example) for all variables. Key settings:
 | `UPSTREAM_HOST` | `api.openai.com` | Host header rewrite + extractor selection |
 | `ENFORCEMENT_MODE` | `off` | `off`, `shadow`, or `enforce` |
 | `REDIS_URL` | `redis://localhost:6379` | Redis connection URL |
-| `ADMIN_API_KEY` | — | Bearer token for `/admin/*` |
+| `DATABASE_URL` | — | Postgres; enables multi-tenant auth |
+| `ADMIN_API_KEY` | — | Bearer for `/admin/*`; Basic password for `/ops` |
 | `RESERVATION_TTL_SEC` | `300` | Unsettled hold expiry |
 | `DEFAULT_RESERVATION_ESTIMATE` | `4096` | Fallback when `max_tokens` absent |
 | `PROMPT_TOKEN_BUFFER` | `512` | Added to parsed `max_tokens` |
 | `PRECHECK_TIMEOUT_MS` | `50` | Redis timeout before fail-open |
-| `SLACK_WEBHOOK_URL` | — | Optional alerts on fail-open / deny |
+| `SLACK_WEBHOOK_URL` | — | Global Slack fallback |
+| `STRIPE_SECRET_KEY` | — | Enables Checkout when set with webhook + prices |
+| `STRIPE_WEBHOOK_SECRET` | — | `/billing/webhook` signature |
+| `STRIPE_PRICE_INDIE` / `STRIPE_PRICE_TEAM` | — | Stripe Price IDs |
 
 ## Health checks
 
 - `GET /healthz` — liveness (always 200)
 - `GET /readyz` — returns 503 when Redis is unreachable (orchestration signal; proxy still serves traffic fail-open)
+- `GET /ops` — operator HTML (Basic auth)
 
 ## Development
 
@@ -158,12 +193,15 @@ go build -o bin/proxy ./cmd/proxy/
 ```
 cmd/proxy/          Entry point
 internal/
-  admin/            Admin API (bucket get/set/topup)
-  budget/           Redis client, Lua scripts, estimate parsing
+  admin/            Admin API
+  billing/          Stripe Checkout + webhook
+  budget/           Redis client, Lua scripts, alerts
   config/           Environment-based configuration
-  proxy/            Reverse proxy, enforcement, settlement taps
+  ops/              /ops HTML page
+  proxy/            Reverse proxy, enforcement, settlement
+  store/            Postgres + memory usage/org stores
   usage/            OpenAI + Anthropic usage extractors
-test/integration/   End-to-end tests (miniredis + mock upstream)
+test/integration/   End-to-end tests
 ```
 
 ## License

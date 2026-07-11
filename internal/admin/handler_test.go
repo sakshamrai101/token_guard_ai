@@ -271,3 +271,31 @@ func TestAdminCreateOrgAndKey(t *testing.T) {
 		t.Fatalf("lookup = %+v err=%v", auth, err)
 	}
 }
+
+func TestAdminPatchOrgSlackWebhook(t *testing.T) {
+	orgs := store.NewMemoryOrgStore()
+	h := NewHandlerWithOrgs(&stubStore{}, nil, orgs, "secret")
+
+	rec := doAdmin(t, h, http.MethodPost, "/admin/v1/orgs", "secret", `{"name":"Acme"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create org status = %d", rec.Code)
+	}
+	var org store.Org
+	_ = json.NewDecoder(rec.Body).Decode(&org)
+
+	rec = doAdmin(t, h, http.MethodPatch, "/admin/v1/orgs/"+org.ID, "secret",
+		`{"slack_webhook_url":"https://hooks.slack.com/services/T/B/X"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("patch status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var updated store.Org
+	_ = json.NewDecoder(rec.Body).Decode(&updated)
+	if updated.SlackWebhookURL != "https://hooks.slack.com/services/T/B/X" {
+		t.Fatalf("webhook = %q", updated.SlackWebhookURL)
+	}
+
+	got, err := orgs.GetOrg(context.Background(), org.ID)
+	if err != nil || got.SlackWebhookURL != updated.SlackWebhookURL {
+		t.Fatalf("store org = %+v err=%v", got, err)
+	}
+}

@@ -36,10 +36,11 @@ type APIKey struct {
 
 // AuthResult is returned after a successful TokenGuard key lookup.
 type AuthResult struct {
-	OrgID     string
-	Plan      string
-	KeyID     string
-	KeyPrefix string
+	OrgID           string
+	Plan            string
+	KeyID           string
+	KeyPrefix       string
+	SlackWebhookURL string
 }
 
 // OrgStore manages orgs, API keys, and bucket registry.
@@ -47,6 +48,7 @@ type OrgStore interface {
 	CreateOrg(ctx context.Context, name string) (Org, error)
 	ListOrgs(ctx context.Context) ([]Org, error)
 	GetOrg(ctx context.Context, orgID string) (Org, error)
+	UpdateOrgSlackWebhook(ctx context.Context, orgID, webhookURL string) (Org, error)
 	CreateAPIKey(ctx context.Context, orgID string) (rawKey string, key APIKey, err error)
 	LookupAPIKey(ctx context.Context, rawKey string) (AuthResult, error)
 	UpsertBucket(ctx context.Context, orgID, bucketID string) error

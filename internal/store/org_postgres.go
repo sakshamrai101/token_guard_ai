@@ -92,6 +92,20 @@ FROM orgs WHERE id = $1
 	return o, nil
 }
 
+func (s *PostgresUsageStore) UpdateOrgSlackWebhook(ctx context.Context, orgID, webhookURL string) (Org, error) {
+	res, err := s.db.ExecContext(ctx, `
+UPDATE orgs SET slack_webhook_url = $2 WHERE id = $1
+`, orgID, webhookURL)
+	if err != nil {
+		return Org{}, fmt.Errorf("update org slack webhook: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return Org{}, ErrNotFound
+	}
+	return s.GetOrg(ctx, orgID)
+}
+
 func (s *PostgresUsageStore) CreateAPIKey(ctx context.Context, orgID string) (string, APIKey, error) {
 	if _, err := s.GetOrg(ctx, orgID); err != nil {
 		return "", APIKey{}, err
@@ -130,12 +144,13 @@ func (s *PostgresUsageStore) LookupAPIKey(ctx context.Context, rawKey string) (A
 		keyID, orgID, prefix, plan string
 		revoked                    sql.NullTime
 	)
+	var slackURL string
 	err := s.db.QueryRowContext(ctx, `
-SELECT k.id, k.org_id, k.key_prefix, k.revoked_at, o.plan
+SELECT k.id, k.org_id, k.key_prefix, k.revoked_at, o.plan, o.slack_webhook_url
 FROM api_keys k
 JOIN orgs o ON o.id = k.org_id
 WHERE k.key_hash = $1
-`, hash).Scan(&keyID, &orgID, &prefix, &revoked, &plan)
+`, hash).Scan(&keyID, &orgID, &prefix, &revoked, &plan, &slackURL)
 	if err == sql.ErrNoRows {
 		return AuthResult{}, ErrInvalidAPIKey
 	}
@@ -146,10 +161,11 @@ WHERE k.key_hash = $1
 		return AuthResult{}, ErrKeyRevoked
 	}
 	return AuthResult{
-		OrgID:     orgID,
-		Plan:      plan,
-		KeyID:     keyID,
-		KeyPrefix: prefix,
+		OrgID:           orgID,
+		Plan:            plan,
+		KeyID:           keyID,
+		KeyPrefix:       prefix,
+		SlackWebhookURL: slackURL,
 	}, nil
 }
 

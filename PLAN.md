@@ -306,55 +306,198 @@ See [ONBOARDING.md](ONBOARDING.md) for full setup walkthrough.
 | Indie | **$15/mo** | 5 buckets, 5M tokens/mo, Slack |
 | Team | **$39/mo** | 25 buckets, 25M tokens/mo, Slack + usage dump |
 
-### Ship in Hosted v1 (P0)
+**Locked technical decisions:**
 
-1. **Multi-tenant API keys** — `tg_xxx` → org → allowed buckets; auth on LLM path
-2. **Postgres** — orgs, api_keys, stripe ids, slack_webhook_url, plan, usage_events
-3. **Redis** — hot budgets only (`budget:{org_id}:{bucket_id}`)
-4. **Stripe Checkout + webhook** — activate/deactivate plan on org
-5. **Slack alerts (per org)** — budget exhausted, 80% warning after settle, fail-open
-6. **Request usage log** — every settle/release: request_id, org, bucket, reserved, actual, outcome, provider, ts
-7. **Dump APIs** — list buckets + balances; usage history; held reservations (JSON; CSV optional)
-8. **Minimal ops page** — single HTML page at `/ops` (admin-key gated): balances, recent requests, held reservations
-9. **VPS deploy** — docker-compose with proxy + redis + postgres; deploy notes in RUNBOOK
+| Item | Choice |
+|------|--------|
+| TokenGuard auth header | `X-TokenGuard-Key: tg_...` (never overload provider Bearer) |
+| Redis budget key | `budget:{org_id}:{bucket_id}` |
+| Hot path | Redis Lua (unchanged) |
+| Durable state | Postgres: orgs, api_keys, usage_events, Stripe fields, slack_webhook_url |
+| Provider keys | Passthrough only — never store |
+| UX in v1 | Dump APIs + `/ops` HTML — **no React SPA** |
 
 ### Explicitly OUT of Hosted v1
 
 - React/SPA dashboard
-- Gemini / Grok native extractors (OpenAI-compatible reuse is enough if needed later)
+- Gemini / Grok native extractors
 - Interactive Slack buttons
 - Email notifications
 - Fancy charts / analytics
-- Holding customer provider API keys (passthrough only)
+- Holding customer provider API keys
 - Per-customer self-hosted Docker as the paid SKU
 
-### Hosted v1 Build Order (strict — one phase per changeset)
+### Hosted v1 phase status
 
-| Phase | Scope | Gate |
-|-------|-------|------|
-| **H1** | Usage event log on settle/release + dump API (`GET /admin/v1/usage`, list buckets) | `go test ./...` |
-| **H2** | Postgres schema: orgs, api_keys; TokenGuard key auth middleware on proxy path | `go test ./...` |
-| **H3** | Slack per-org webhook + 80% threshold alert after settle | `go test ./...` |
-| **H4** | Stripe Checkout + webhook → set org plan; reject over-limit orgs | `go test ./...` + manual Stripe test mode |
-| **H5** | Minimal `/ops` HTML page (balances, recent usage, held reservations) | manual smoke |
-| **H6** | Compose: postgres service + VPS deploy section in RUNBOOK; README hosted quickstart | deploy smoke |
+| Phase | Status |
+|-------|--------|
+| **H1** Usage log + dump APIs | **Done** |
+| **H2** Multi-tenant auth (`tg_` keys, org-scoped Redis) | **Done** |
+| **H3** Slack per-org + 80% warning | **Next** |
+| **H4** Stripe Checkout + webhook | Pending |
+| **H5** Minimal `/ops` HTML page | Pending |
+| **H6** Postgres in Compose + VPS deploy docs | Pending |
 
-Do NOT combine H1–H4 into one PR. TDD for each phase. All existing tests must keep passing.
+Do NOT combine phases. TDD each phase. `go test ./...` must stay green. Update [ARCHITECTURE.md](ARCHITECTURE.md) **after** each phase ships (not before).
 
-### Hosted v1 Definition of Done
+---
 
-- [ ] Customer with `tg_` key can call proxy; unknown key → 401
-- [ ] Budget keys scoped per org in Redis
-- [ ] Settled requests appear in usage dump
-- [ ] Slack fires on exhaust + 80% + fail-open
-- [ ] Stripe test-mode Checkout activates Indie/Team plan
-- [ ] `/ops` shows balances + recent requests (admin auth)
-- [ ] `docker compose up` runs proxy + redis + postgres
+### H1 — Usage log + dump APIs (DONE)
+
+**Shipped:**
+
+- `internal/store` — `UsageEvent`, memory + Postgres stores; `org_id=default` until H2
+- Settle/release → `usage_events` (`settled` / `missing_usage` / `disconnected` / `released`)
+- Admin dump APIs: `GET /admin/v1/usage`, `GET /admin/v1/buckets`, `GET /admin/v1/reservations`
+- `DATABASE_URL` optional (memory store when unset)
+
+---
+
+### H2 — Multi-tenant auth (DONE)
+
+**Shipped:**
+
+- Postgres: `orgs`, `api_keys` (hash + prefix), `buckets` registry
+- Auth middleware: `X-TokenGuard-Key` → org; missing/invalid → **401**
+- Redis keys: `budget:{org_id}:{bucket_id}`
+- Admin: create org, create key (raw `tg_` returned once)
+- Usage events use real `org_id` from context
+
+---
+
+### H3 — Slack per-org + 80% warning (NEXT)
+
+**Goal:** Per-org Slack webhooks for exhausted, 80% warning, and fail-open.
+
+**Deliverables:**
+
+1. Persist `slack_webhook_url` on `orgs`
+2. Admin: `PATCH /admin/v1/orgs/{id}` with `{ "slack_webhook_url": "https://hooks.slack.com/..." }`
+3. Alert routing: org webhook when set; else global `SLACK_WEBHOOK_URL`
+4. **`budget_exhausted`** — on reserve denied in `enforce` (org_id, bucket_id, request_id)
+5. **`budget_warning_80`** — after successful settle: if remaining ≤ 20% of (balance + actual) or of configured cap; **dedupe** once per org+bucket per hour (Redis key TTL 1h)
+6. **`fail_open`** — keep CRITICAL path; prefer org webhook when org known
+7. Extend existing `Alerter` / thin wrapper — do not break current call sites
+
+**Tests:**
+
+- httptest mock: exhausted, warning, fail-open each fire once
+- Dedupe: two under-threshold settles within TTL → one warning
+- Org webhook preferred over global when both set
+- Full suite green
+
+**NOT H3:** Stripe, `/ops`, interactive Slack buttons, email
+
+**H3 Definition of Done:**
+
+- [ ] PATCH org sets Slack webhook
+- [ ] Exhausted / 80% / fail-open alerts verified in tests
+- [ ] Dedupe works
 - [ ] `go test ./...` green
+
+---
+
+### H4 — Stripe Checkout + webhook
+
+**Goal:** Stripe test-mode Checkout activates Indie ($15) / Team ($39); subscription deleted downgrades.
+
+**Deliverables:**
+
+1. Env: `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_INDIE`, `STRIPE_PRICE_TEAM`
+2. Package `internal/billing` — Checkout Session + webhook signature verify
+3. `POST /admin/v1/orgs/{id}/checkout` — body `{ "plan": "indie"|"team" }` → Checkout URL (ADMIN_API_KEY)
+4. `POST /billing/webhook` — `checkout.session.completed` → set `orgs.plan` + Stripe IDs; `customer.subscription.deleted` → plan back to `trial`
+5. Persist `stripe_customer_id`, `stripe_subscription_id` on org
+6. Soft enforce for v1: allow traffic on trial; Slack warn if useful — **no hard paywall required in H4**
+
+**Tests:**
+
+- Webhook with mocked secret updates `org.plan`
+- Checkout endpoint returns URL from mocked Stripe client
+- Invalid signature → 400
+- Full suite green
+
+**NOT H4:** Self-serve signup UI, customer portal, `/ops`
+
+**H4 Definition of Done:**
+
+- [ ] Admin can start Checkout for an org
+- [ ] Webhook activates/downgrades plan
+- [ ] Document Stripe CLI forward for local test
+- [ ] `go test ./...` green
+
+---
+
+### H5 — Minimal `/ops` HTML page
+
+**Goal:** Server-rendered ops view — no React.
+
+**Deliverables:**
+
+1. `GET /ops` — Go `html/template` + minimal CSS
+2. Auth: HTTP Basic (user `admin`, password = `ADMIN_API_KEY`) → 401 if wrong
+3. Sections: bucket balances (with org_id), last 50 `usage_events`, open reservations
+4. Register on mux before catch-all; never proxy `/ops` upstream
+
+**Tests:**
+
+- Unauthorized → 401
+- Authorized → 200 + expected headings
+- Full suite green
+
+**NOT H5:** Charts, customer dashboard, Stripe UI
+
+**H5 Definition of Done:**
+
+- [ ] `/ops` usable in browser with Basic auth
+- [ ] Shows balances + usage + reservations
+- [ ] `go test ./...` green
+
+---
+
+### H6 — Deploy (Compose Postgres + VPS docs)
+
+**Goal:** One-command stack + operator docs.
+
+**Deliverables:**
+
+1. `postgres` service in `docker-compose.yml` (healthcheck + volume)
+2. `.env.example` — `DATABASE_URL`, Stripe vars, Slack, existing admin/redis
+3. Schema auto-migrate on proxy startup (orgs / keys / usage / Stripe columns)
+4. `docs/RUNBOOK.md` — VPS deploy, Stripe webhook URL, create org → key → Slack → Checkout
+5. `README.md` — hosted quickstart with `X-TokenGuard-Key`
+
+**Tests / gate:**
+
+- `go test ./...` green
+- Manual: `docker compose up -d --build` smoke checklist documented
+
+**NOT H6:** K8s, Terraform, CI deploy, Gemini
+
+**H6 Definition of Done:**
+
+- [ ] Compose runs proxy + redis + postgres
+- [ ] RUNBOOK + README updated for hosted multi-tenant
+- [ ] Hosted v1 overall DoD checklist below is checkable
+
+---
+
+### Hosted v1 overall Definition of Done
+
+- [x] Settled/released requests appear in usage dump (H1)
+- [x] Customer with `tg_` key can call proxy; unknown key → 401 (H2)
+- [x] Budget keys scoped per org in Redis (H2)
+- [ ] Slack fires on exhaust + 80% + fail-open (H3)
+- [ ] Stripe test-mode Checkout activates Indie/Team plan (H4)
+- [ ] `/ops` shows balances + recent requests (admin auth) (H5)
+- [ ] `docker compose up` runs proxy + redis + postgres (H6)
+- [ ] `go test ./...` green
+
+---
 
 ### Post–Hosted-v1 (build on demand)
 
-Overview of what comes next after interest is proven — **not in current builder scope**:
+Overview of what comes **after** H6 and proven interest — **not in H3–H6 builder scope**. Capture in ARCHITECTURE.md when each is designed.
 
 | Priority | Feature | Why later |
 |----------|---------|-----------|

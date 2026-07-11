@@ -33,10 +33,14 @@ type createOrgRequest struct {
 	Name string `json:"name"`
 }
 
+type patchOrgRequest struct {
+	SlackWebhookURL *string `json:"slack_webhook_url"`
+}
+
 type createKeyResponse struct {
-	Key     string     `json:"key"`
+	Key     string       `json:"key"`
 	APIKey  store.APIKey `json:"api_key"`
-	Warning string     `json:"warning"`
+	Warning string       `json:"warning"`
 }
 
 type Handler struct {
@@ -69,6 +73,7 @@ func NewHandlerWithOrgs(budgetStore Store, usage UsageQuerier, orgs store.OrgSto
 	h.mux.HandleFunc("GET /admin/v1/reservations", h.handleListReservations)
 	h.mux.HandleFunc("POST /admin/v1/orgs", h.handleCreateOrg)
 	h.mux.HandleFunc("GET /admin/v1/orgs", h.handleListOrgs)
+	h.mux.HandleFunc("PATCH /admin/v1/orgs/{id}", h.handlePatchOrg)
 	h.mux.HandleFunc("POST /admin/v1/orgs/{id}/keys", h.handleCreateKey)
 	return h
 }
@@ -273,6 +278,42 @@ func (h *Handler) handleListOrgs(w http.ResponseWriter, r *http.Request) {
 		orgs = []store.Org{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"orgs": orgs})
+}
+
+func (h *Handler) handlePatchOrg(w http.ResponseWriter, r *http.Request) {
+	if h.orgs == nil {
+		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "org store not configured"})
+		return
+	}
+	orgID := r.PathValue("id")
+	if orgID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing org id"})
+		return
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+	var req patchOrgRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	if req.SlackWebhookURL == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "slack_webhook_url is required"})
+		return
+	}
+	org, err := h.orgs.UpdateOrgSlackWebhook(r.Context(), orgID, strings.TrimSpace(*req.SlackWebhookURL))
+	if err == store.ErrNotFound {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "org not found"})
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to update org"})
+		return
+	}
+	writeJSON(w, http.StatusOK, org)
 }
 
 func (h *Handler) handleCreateKey(w http.ResponseWriter, r *http.Request) {

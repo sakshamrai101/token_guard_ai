@@ -62,14 +62,19 @@ func TestAuthMiddlewareValidKeySetsOrgContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateOrg: %v", err)
 	}
+	_, err = orgs.UpdateOrgSlackWebhook(context.Background(), org.ID, "https://hooks.slack.com/org")
+	if err != nil {
+		t.Fatalf("UpdateOrgSlackWebhook: %v", err)
+	}
 	raw, _, err := orgs.CreateAPIKey(context.Background(), org.ID)
 	if err != nil {
 		t.Fatalf("CreateAPIKey: %v", err)
 	}
 
-	var gotOrg string
+	var gotOrg, gotWebhook string
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotOrg = OrgIDFromContext(r.Context())
+		gotWebhook = OrgWebhookFromContext(r.Context())
 		w.WriteHeader(http.StatusOK)
 	})
 	mw := NewAuthMiddleware(orgs, next)
@@ -84,5 +89,8 @@ func TestAuthMiddlewareValidKeySetsOrgContext(t *testing.T) {
 	}
 	if gotOrg != org.ID {
 		t.Fatalf("org = %q, want %q", gotOrg, org.ID)
+	}
+	if gotWebhook != "https://hooks.slack.com/org" {
+		t.Fatalf("webhook = %q", gotWebhook)
 	}
 }

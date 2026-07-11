@@ -89,6 +89,11 @@ func (c *Client) Ready(ctx context.Context) bool {
 	return c.rdb.Ping(ctx).Err() == nil
 }
 
+// WarningDedupe returns a Redis-backed once-per-hour warning deduper.
+func (c *Client) WarningDedupe() *RedisWarningDedupe {
+	return NewRedisWarningDedupe(c.rdb, time.Hour)
+}
+
 // budgetKey returns Redis key budget:{orgID}:{bucketID}.
 // Empty orgID falls back to "default" for single-tenant / self-hosted mode.
 func budgetKey(orgID, bucketID string) string {

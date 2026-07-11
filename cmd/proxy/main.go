@@ -28,6 +28,7 @@ func main() {
 	var checker proxy.BudgetChecker
 	var releaser proxy.BudgetReleaser
 	var settler proxy.BudgetSettler
+	var balances proxy.BalanceReader
 	var extractor usage.UsageExtractor
 	var streamExt usage.StreamExtractor
 	var readiness proxy.ReadinessChecker
@@ -65,6 +66,8 @@ func main() {
 		}
 		defer redisClient.Close()
 
+		alerter = alerter.WithDedupe(redisClient.WarningDedupe())
+
 		if cfg.AdminAPIKey != "" {
 			adminHandler = admin.NewHandlerWithOrgs(admin.NewRedisStore(redisClient), usageStore, orgStore, cfg.AdminAPIKey)
 		}
@@ -74,6 +77,7 @@ func main() {
 			checker = proxy.NewBudgetCheckerBridge(budgetChecker)
 			releaser = redisClient
 			settler = redisClient
+			balances = redisClient
 			providers := usage.RegistryForHost(cfg.UpstreamHost)
 			extractor = providers.JSON
 			streamExt = providers.Stream
@@ -87,6 +91,9 @@ func main() {
 	if err != nil {
 		logger.Error("failed to create proxy handler", "error", err)
 		os.Exit(1)
+	}
+	if balances != nil {
+		handler.WithBalances(balances)
 	}
 
 	var llm http.Handler = handler

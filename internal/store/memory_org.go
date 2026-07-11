@@ -60,6 +60,18 @@ func (s *MemoryOrgStore) GetOrg(_ context.Context, orgID string) (Org, error) {
 	return o, nil
 }
 
+func (s *MemoryOrgStore) UpdateOrgSlackWebhook(_ context.Context, orgID, webhookURL string) (Org, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	o, ok := s.orgs[orgID]
+	if !ok {
+		return Org{}, ErrNotFound
+	}
+	o.SlackWebhookURL = webhookURL
+	s.orgs[orgID] = o
+	return o, nil
+}
+
 func (s *MemoryOrgStore) CreateAPIKey(_ context.Context, orgID string) (string, APIKey, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -105,10 +117,11 @@ func (s *MemoryOrgStore) LookupAPIKey(_ context.Context, rawKey string) (AuthRes
 		return AuthResult{}, ErrInvalidAPIKey
 	}
 	return AuthResult{
-		OrgID:     key.OrgID,
-		Plan:      org.Plan,
-		KeyID:     key.ID,
-		KeyPrefix: key.KeyPrefix,
+		OrgID:           key.OrgID,
+		Plan:            org.Plan,
+		KeyID:           key.ID,
+		KeyPrefix:       key.KeyPrefix,
+		SlackWebhookURL: org.SlackWebhookURL,
 	}, nil
 }
 

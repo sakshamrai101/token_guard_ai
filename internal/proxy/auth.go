@@ -9,8 +9,9 @@ import (
 )
 
 const (
-	orgIDContextKey   ctxKey = "org_id"
-	orgPlanContextKey ctxKey = "org_plan"
+	orgIDContextKey      ctxKey = "org_id"
+	orgPlanContextKey    ctxKey = "org_plan"
+	orgWebhookContextKey ctxKey = "org_webhook"
 )
 
 // KeyLookup resolves a TokenGuard API key to an org.
@@ -20,8 +21,8 @@ type KeyLookup interface {
 
 // AuthMiddleware requires X-TokenGuard-Key on LLM proxy requests.
 type AuthMiddleware struct {
-	keys   KeyLookup
-	next   http.Handler
+	keys KeyLookup
+	next http.Handler
 }
 
 func NewAuthMiddleware(keys KeyLookup, next http.Handler) *AuthMiddleware {
@@ -41,6 +42,7 @@ func (m *AuthMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := context.WithValue(r.Context(), orgIDContextKey, auth.OrgID)
 	ctx = context.WithValue(ctx, orgPlanContextKey, auth.Plan)
+	ctx = context.WithValue(ctx, orgWebhookContextKey, auth.SlackWebhookURL)
 	m.next.ServeHTTP(w, r.WithContext(ctx))
 }
 
@@ -49,6 +51,13 @@ func OrgIDFromContext(ctx context.Context) string {
 		return v
 	}
 	return store.DefaultOrgID
+}
+
+func OrgWebhookFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(orgWebhookContextKey).(string); ok {
+		return v
+	}
+	return ""
 }
 
 func writeAuthError(w http.ResponseWriter, status int, msg string) {

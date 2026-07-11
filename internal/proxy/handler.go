@@ -25,12 +25,18 @@ type BudgetReleaser interface {
 	Release(ctx context.Context, requestID string) error
 }
 
+// BalanceReader reads post-settle remaining budget for 80% warnings.
+type BalanceReader interface {
+	GetBalance(ctx context.Context, orgID, bucketID string) (int64, error)
+}
+
 type Handler struct {
 	cfg           config.Config
 	proxy         *httputil.ReverseProxy
 	enforcement   *Enforcement
 	releaser      BudgetReleaser
 	settler       BudgetSettler
+	balances      BalanceReader
 	extractor     usage.UsageExtractor
 	streamExt     usage.StreamExtractor
 	estimateCfg   budget.EstimateConfig
@@ -88,12 +94,12 @@ func NewHandlerWithRegistry(
 	}
 
 	h := &Handler{
-		cfg:          cfg,
-		enforcement:  enforcement,
-		releaser:     releaser,
-		settler:      settler,
-		extractor:    extractor,
-		streamExt:    streamExt,
+		cfg:         cfg,
+		enforcement: enforcement,
+		releaser:    releaser,
+		settler:     settler,
+		extractor:   extractor,
+		streamExt:   streamExt,
 		estimateCfg: budget.EstimateConfig{
 			DefaultEstimate: cfg.DefaultReservationEst,
 			PromptBuffer:    cfg.PromptTokenBuffer,
@@ -117,6 +123,12 @@ func NewHandlerWithRegistry(
 	return h, nil
 }
 
+// WithBalances enables post-settle 80% budget warnings.
+func (h *Handler) WithBalances(b BalanceReader) *Handler {
+	h.balances = b
+	return h
+}
+
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	requestID := r.Header.Get("X-Request-Id")
 	if requestID == "" {
@@ -125,6 +137,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	bucketID := r.Header.Get("X-Budget-Bucket-Id")
 	orgID := OrgIDFromContext(r.Context())
+	orgWebhook := OrgWebhookFromContext(r.Context())
 
 	body, restored, err := budget.ReadAndRestoreBody(r.Body)
 	if err != nil {
@@ -142,7 +155,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if bucketID == "" && h.cfg.EnforcementMode != config.EnforcementOff {
 		h.logger.Warn("missing bucket id, fail-open forward", "request_id", requestID)
 		h.metrics.IncFailOpen()
-		h.alerter.FailOpen(r.Context(), requestID, bucketID, "missing bucket_id")
+		h.alerter.FailOpenAt(r.Context(), orgWebhook, orgID, requestID, bucketID, "missing bucket_id")
 		result = PreCheckResult{Allowed: true, FailOpen: true}
 		outcome = "fail_open"
 	} else {
@@ -150,10 +163,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case result.FailOpen:
 			h.metrics.IncFailOpen()
-			h.alerter.FailOpen(r.Context(), requestID, bucketID, "redis error or timeout")
+			h.alerter.FailOpenAt(r.Context(), orgWebhook, orgID, requestID, bucketID, "redis error or timeout")
 			outcome = "fail_open"
 		case !result.Allowed:
-			h.alerter.BudgetDenied(r.Context(), requestID, bucketID, estimate)
+			h.alerter.BudgetExhausted(r.Context(), orgWebhook, orgID, bucketID, requestID, estimate)
 			outcome = "denied"
 		default:
 			outcome = "allowed"
@@ -185,6 +198,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx = context.WithValue(ctx, reservedContextKey, result.Reserved)
 	ctx = context.WithValue(ctx, bucketIDContextKey, bucketID)
 	ctx = context.WithValue(ctx, orgIDContextKey, orgID)
+	ctx = context.WithValue(ctx, orgWebhookContextKey, orgWebhook)
 	h.proxy.ServeHTTP(w, r.WithContext(ctx))
 }
 
@@ -214,11 +228,14 @@ func (h *Handler) modifyResponse(resp *http.Response) error {
 	if resp.StatusCode == 200 && h.settler != nil && requestID != "" {
 		params := settlementParams{
 			settler:     h.settler,
+			balances:    h.balances,
+			alerter:     h.alerter,
 			metrics:     h.metrics,
 			usageLogger: h.usageLogger,
 			ctx:         resp.Request.Context(),
 			requestID:   requestID,
 			orgID:       orgID,
+			orgWebhook:  OrgWebhookFromContext(resp.Request.Context()),
 			bucketID:    bucketID,
 			provider:    h.upstreamHost,
 			reserved:    reserved,

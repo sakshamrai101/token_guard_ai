@@ -72,6 +72,34 @@ func (s *MemoryOrgStore) UpdateOrgSlackWebhook(_ context.Context, orgID, webhook
 	return o, nil
 }
 
+func (s *MemoryOrgStore) ApplyCheckoutCompleted(_ context.Context, orgID, plan, customerID, subscriptionID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	o, ok := s.orgs[orgID]
+	if !ok {
+		return ErrNotFound
+	}
+	o.Plan = plan
+	o.StripeCustomerID = customerID
+	o.StripeSubscriptionID = subscriptionID
+	s.orgs[orgID] = o
+	return nil
+}
+
+func (s *MemoryOrgStore) DowngradeBySubscription(_ context.Context, subscriptionID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, o := range s.orgs {
+		if o.StripeSubscriptionID == subscriptionID {
+			o.Plan = "trial"
+			o.StripeSubscriptionID = ""
+			s.orgs[id] = o
+			return nil
+		}
+	}
+	return ErrNotFound
+}
+
 func (s *MemoryOrgStore) CreateAPIKey(_ context.Context, orgID string) (string, APIKey, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

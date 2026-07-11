@@ -333,8 +333,8 @@ See [ONBOARDING.md](ONBOARDING.md) for full setup walkthrough.
 |-------|--------|
 | **H1** Usage log + dump APIs | **Done** |
 | **H2** Multi-tenant auth (`tg_` keys, org-scoped Redis) | **Done** |
-| **H3** Slack per-org + 80% warning | **Next** |
-| **H4** Stripe Checkout + webhook | Pending |
+| **H3** Slack per-org + 80% warning | **Done** |
+| **H4** Stripe Checkout + webhook | **Next** |
 | **H5** Minimal `/ops` HTML page | Pending |
 | **H6** Postgres in Compose + VPS deploy docs | Pending |
 
@@ -365,39 +365,17 @@ Do NOT combine phases. TDD each phase. `go test ./...` must stay green. Update [
 
 ---
 
-### H3 — Slack per-org + 80% warning (NEXT)
+### H3 — Slack per-org + 80% warning (DONE)
 
-**Goal:** Per-org Slack webhooks for exhausted, 80% warning, and fail-open.
+**Shipped:**
 
-**Deliverables:**
-
-1. Persist `slack_webhook_url` on `orgs`
-2. Admin: `PATCH /admin/v1/orgs/{id}` with `{ "slack_webhook_url": "https://hooks.slack.com/..." }`
-3. Alert routing: org webhook when set; else global `SLACK_WEBHOOK_URL`
-4. **`budget_exhausted`** — on reserve denied in `enforce` (org_id, bucket_id, request_id)
-5. **`budget_warning_80`** — after successful settle: if remaining ≤ 20% of (balance + actual) or of configured cap; **dedupe** once per org+bucket per hour (Redis key TTL 1h)
-6. **`fail_open`** — keep CRITICAL path; prefer org webhook when org known
-7. Extend existing `Alerter` / thin wrapper — do not break current call sites
-
-**Tests:**
-
-- httptest mock: exhausted, warning, fail-open each fire once
-- Dedupe: two under-threshold settles within TTL → one warning
-- Org webhook preferred over global when both set
-- Full suite green
-
-**NOT H3:** Stripe, `/ops`, interactive Slack buttons, email
-
-**H3 Definition of Done:**
-
-- [ ] PATCH org sets Slack webhook
-- [ ] Exhausted / 80% / fail-open alerts verified in tests
-- [ ] Dedupe works
-- [ ] `go test ./...` green
+- `slack_webhook_url` on orgs + admin PATCH
+- Org webhook preferred over global `SLACK_WEBHOOK_URL`
+- Alerts: `budget_exhausted`, `budget_warning_80` (1h Redis dedupe), `fail_open`
 
 ---
 
-### H4 — Stripe Checkout + webhook
+### H4 — Stripe Checkout + webhook (NEXT)
 
 **Goal:** Stripe test-mode Checkout activates Indie ($15) / Team ($39); subscription deleted downgrades.
 
@@ -487,7 +465,7 @@ Do NOT combine phases. TDD each phase. `go test ./...` must stay green. Update [
 - [x] Settled/released requests appear in usage dump (H1)
 - [x] Customer with `tg_` key can call proxy; unknown key → 401 (H2)
 - [x] Budget keys scoped per org in Redis (H2)
-- [ ] Slack fires on exhaust + 80% + fail-open (H3)
+- [x] Slack fires on exhaust + 80% + fail-open (H3)
 - [ ] Stripe test-mode Checkout activates Indie/Team plan (H4)
 - [ ] `/ops` shows balances + recent requests (admin auth) (H5)
 - [ ] `docker compose up` runs proxy + redis + postgres (H6)

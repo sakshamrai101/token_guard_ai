@@ -17,12 +17,12 @@ type alwaysReady struct{}
 func (alwaysReady) Ready() bool { return true }
 
 type Server struct {
-	cfg       config.Config
-	handler   http.Handler
-	admin     http.Handler
-	ready     ReadinessChecker
-	logger    *slog.Logger
-	mux       *http.ServeMux
+	cfg     config.Config
+	handler http.Handler
+	admin   http.Handler
+	ready   ReadinessChecker
+	logger  *slog.Logger
+	mux     *http.ServeMux
 }
 
 func NewServer(cfg config.Config, handler http.Handler, admin http.Handler, ready ReadinessChecker, logger *slog.Logger) *Server {
@@ -43,6 +43,12 @@ func NewServer(cfg config.Config, handler http.Handler, admin http.Handler, read
 	}
 	s.routes()
 	return s
+}
+
+// Handle registers an extra route on the server mux (e.g. billing webhook).
+// Must be called before ListenAndServe. Patterns are not proxied upstream.
+func (s *Server) Handle(pattern string, h http.Handler) {
+	s.mux.Handle(pattern, h)
 }
 
 func (s *Server) routes() {

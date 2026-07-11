@@ -1,7 +1,9 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strconv"
@@ -9,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/saksham/token-guard-ai/internal/billing"
 	"github.com/saksham/token-guard-ai/internal/budget"
 	"github.com/saksham/token-guard-ai/internal/store"
 )
@@ -44,12 +47,18 @@ type createKeyResponse struct {
 }
 
 type Handler struct {
-	store  Store
-	usage  UsageQuerier
-	orgs   store.OrgStore
-	apiKey string
-	mux    *http.ServeMux
-	limit  *rateLimiter
+	store    Store
+	usage    UsageQuerier
+	orgs     store.OrgStore
+	checkout CheckoutStarter
+	apiKey   string
+	mux      *http.ServeMux
+	limit    *rateLimiter
+}
+
+// CheckoutStarter starts a Stripe Checkout Session for an org.
+type CheckoutStarter interface {
+	StartCheckout(ctx context.Context, orgID, plan string) (checkoutURL string, err error)
 }
 
 func NewHandler(budgetStore Store, usage UsageQuerier, apiKey string) *Handler {
@@ -57,13 +66,18 @@ func NewHandler(budgetStore Store, usage UsageQuerier, apiKey string) *Handler {
 }
 
 func NewHandlerWithOrgs(budgetStore Store, usage UsageQuerier, orgs store.OrgStore, apiKey string) *Handler {
+	return NewHandlerWithBilling(budgetStore, usage, orgs, nil, apiKey)
+}
+
+func NewHandlerWithBilling(budgetStore Store, usage UsageQuerier, orgs store.OrgStore, checkout CheckoutStarter, apiKey string) *Handler {
 	h := &Handler{
-		store:  budgetStore,
-		usage:  usage,
-		orgs:   orgs,
-		apiKey: apiKey,
-		mux:    http.NewServeMux(),
-		limit:  newRateLimiter(defaultRateLimit, time.Minute),
+		store:    budgetStore,
+		usage:    usage,
+		orgs:     orgs,
+		checkout: checkout,
+		apiKey:   apiKey,
+		mux:      http.NewServeMux(),
+		limit:    newRateLimiter(defaultRateLimit, time.Minute),
 	}
 	h.mux.HandleFunc("GET /admin/v1/buckets/{id}", h.handleGet)
 	h.mux.HandleFunc("PUT /admin/v1/buckets/{id}", h.handlePut)
@@ -75,6 +89,7 @@ func NewHandlerWithOrgs(budgetStore Store, usage UsageQuerier, orgs store.OrgSto
 	h.mux.HandleFunc("GET /admin/v1/orgs", h.handleListOrgs)
 	h.mux.HandleFunc("PATCH /admin/v1/orgs/{id}", h.handlePatchOrg)
 	h.mux.HandleFunc("POST /admin/v1/orgs/{id}/keys", h.handleCreateKey)
+	h.mux.HandleFunc("POST /admin/v1/orgs/{id}/checkout", h.handleCheckout)
 	return h
 }
 
@@ -341,6 +356,46 @@ func (h *Handler) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 		APIKey:  key,
 		Warning: "store this key now; it will not be shown again",
 	})
+}
+
+type checkoutRequest struct {
+	Plan string `json:"plan"`
+}
+
+func (h *Handler) handleCheckout(w http.ResponseWriter, r *http.Request) {
+	if h.checkout == nil {
+		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "billing not configured"})
+		return
+	}
+	orgID := r.PathValue("id")
+	if orgID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing org id"})
+		return
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+	var req checkoutRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	url, err := h.checkout.StartCheckout(r.Context(), orgID, req.Plan)
+	if errors.Is(err, store.ErrNotFound) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "org not found"})
+		return
+	}
+	if errors.Is(err, billing.ErrInvalidPlan) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "plan must be indie or team"})
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create checkout session"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"url": url})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

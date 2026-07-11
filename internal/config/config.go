@@ -35,6 +35,13 @@ type Config struct {
 	SlackWebhookURL       string
 	AdminAPIKey           string
 	DatabaseURL           string
+
+	StripeSecretKey      string
+	StripeWebhookSecret  string
+	StripePriceIndie     string
+	StripePriceTeam      string
+	StripeSuccessURL     string
+	StripeCancelURL      string
 }
 
 func Load() (Config, error) {
@@ -114,6 +121,12 @@ func Load() (Config, error) {
 		SlackWebhookURL:       getEnv("SLACK_WEBHOOK_URL", ""),
 		AdminAPIKey:           getEnv("ADMIN_API_KEY", ""),
 		DatabaseURL:           getEnv("DATABASE_URL", ""),
+		StripeSecretKey:       getEnv("STRIPE_SECRET_KEY", ""),
+		StripeWebhookSecret:   getEnv("STRIPE_WEBHOOK_SECRET", ""),
+		StripePriceIndie:      getEnv("STRIPE_PRICE_INDIE", ""),
+		StripePriceTeam:       getEnv("STRIPE_PRICE_TEAM", ""),
+		StripeSuccessURL:      getEnv("STRIPE_SUCCESS_URL", "http://localhost:8080/?checkout=success"),
+		StripeCancelURL:       getEnv("STRIPE_CANCEL_URL", "http://localhost:8080/?checkout=cancel"),
 	}, nil
 }
 

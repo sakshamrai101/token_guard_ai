@@ -17,12 +17,14 @@ var (
 )
 
 type Org struct {
-	ID               string    `json:"id"`
-	Name             string    `json:"name"`
-	Plan             string    `json:"plan"`
-	SlackWebhookURL  string    `json:"slack_webhook_url,omitempty"`
-	DefaultBucketID  string    `json:"default_bucket_id,omitempty"`
-	CreatedAt        time.Time `json:"created_at"`
+	ID                    string    `json:"id"`
+	Name                  string    `json:"name"`
+	Plan                  string    `json:"plan"`
+	SlackWebhookURL       string    `json:"slack_webhook_url,omitempty"`
+	DefaultBucketID       string    `json:"default_bucket_id,omitempty"`
+	StripeCustomerID      string    `json:"stripe_customer_id,omitempty"`
+	StripeSubscriptionID  string    `json:"stripe_subscription_id,omitempty"`
+	CreatedAt             time.Time `json:"created_at"`
 }
 
 type APIKey struct {
@@ -49,6 +51,8 @@ type OrgStore interface {
 	ListOrgs(ctx context.Context) ([]Org, error)
 	GetOrg(ctx context.Context, orgID string) (Org, error)
 	UpdateOrgSlackWebhook(ctx context.Context, orgID, webhookURL string) (Org, error)
+	ApplyCheckoutCompleted(ctx context.Context, orgID, plan, customerID, subscriptionID string) error
+	DowngradeBySubscription(ctx context.Context, subscriptionID string) error
 	CreateAPIKey(ctx context.Context, orgID string) (rawKey string, key APIKey, err error)
 	LookupAPIKey(ctx context.Context, rawKey string) (AuthResult, error)
 	UpsertBucket(ctx context.Context, orgID, bucketID string) error

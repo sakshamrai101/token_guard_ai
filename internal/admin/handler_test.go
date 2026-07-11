@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/saksham/token-guard-ai/internal/billing"
 	"github.com/saksham/token-guard-ai/internal/budget"
 	"github.com/saksham/token-guard-ai/internal/store"
 )
@@ -297,5 +298,56 @@ func TestAdminPatchOrgSlackWebhook(t *testing.T) {
 	got, err := orgs.GetOrg(context.Background(), org.ID)
 	if err != nil || got.SlackWebhookURL != updated.SlackWebhookURL {
 		t.Fatalf("store org = %+v err=%v", got, err)
+	}
+}
+
+type mockCheckout struct {
+	url    string
+	err    error
+	orgID  string
+	plan   string
+}
+
+func (m *mockCheckout) StartCheckout(_ context.Context, orgID, plan string) (string, error) {
+	m.orgID = orgID
+	m.plan = plan
+	return m.url, m.err
+}
+
+func TestAdminCheckoutReturnsURL(t *testing.T) {
+	orgs := store.NewMemoryOrgStore()
+	org, _ := orgs.CreateOrg(context.Background(), "Acme")
+	checkout := &mockCheckout{url: "https://checkout.stripe.com/c/pay/cs_test"}
+	h := NewHandlerWithBilling(&stubStore{}, nil, orgs, checkout, "secret")
+
+	rec := doAdmin(t, h, http.MethodPost, "/admin/v1/orgs/"+org.ID+"/checkout", "secret", `{"plan":"indie"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]string
+	_ = json.NewDecoder(rec.Body).Decode(&resp)
+	if resp["url"] != checkout.url {
+		t.Fatalf("resp = %+v", resp)
+	}
+	if checkout.orgID != org.ID || checkout.plan != "indie" {
+		t.Fatalf("checkout args = %s/%s", checkout.orgID, checkout.plan)
+	}
+}
+
+func TestAdminCheckoutUnknownOrg(t *testing.T) {
+	h := NewHandlerWithBilling(&stubStore{}, nil, store.NewMemoryOrgStore(), &mockCheckout{err: store.ErrNotFound}, "secret")
+	rec := doAdmin(t, h, http.MethodPost, "/admin/v1/orgs/missing/checkout", "secret", `{"plan":"indie"}`)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d", rec.Code)
+	}
+}
+
+func TestAdminCheckoutBadPlan(t *testing.T) {
+	orgs := store.NewMemoryOrgStore()
+	org, _ := orgs.CreateOrg(context.Background(), "Acme")
+	h := NewHandlerWithBilling(&stubStore{}, nil, orgs, &mockCheckout{err: billing.ErrInvalidPlan}, "secret")
+	rec := doAdmin(t, h, http.MethodPost, "/admin/v1/orgs/"+org.ID+"/checkout", "secret", `{"plan":"trial"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d", rec.Code)
 	}
 }

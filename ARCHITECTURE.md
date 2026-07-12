@@ -676,95 +676,142 @@ Do NOT combine Launch-1 and Launch-2 in one changeset.
 
 ---
 
-## 14. Hosted Product v1 Architecture (Multi-Tenant)
+## 14. Hosted Product v1 Architecture (Multi-Tenant) — AS SHIPPED
 
-### 14.1 How services talk
+Status: **H1–H6 complete** on `production`. This section matches the running code.
 
-1. **Customer app** sends LLM request to `https://proxy.tokenguard.ai/...` with:
-   - Provider auth header (passthrough: `Authorization` / `x-api-key`)
-   - `Authorization: Bearer tg_...` **or** `X-TokenGuard-Key: tg_...` (prefer dedicated header so it does not clash with OpenAI Bearer — **use `X-TokenGuard-Key`**)
-   - `X-Budget-Bucket-Id: <bucket>` (optional if org has a default bucket)
-2. **Proxy auth middleware** loads API key from Postgres → `org_id`, `plan`, `slack_webhook_url`, allowed buckets.
-3. **Budget path** uses Redis key `budget:{org_id}:{bucket_id}` with existing Lua reserve/settle/release.
-4. On settle/release, proxy **writes a usage_events row** (Postgres) and may fire Slack (80% / exhausted).
-5. **Stripe Checkout** (customer pays on landing) → webhook updates `orgs.plan` / `stripe_subscription_id`.
-6. **Admin / ops** use `ADMIN_API_KEY` (operator) or org-scoped admin later; v1 ops page uses operator admin key.
+### 14.1 Request path (how pieces talk)
 
-Provider API keys never stored. Fail-open unchanged: Redis/Postgres auth failure policy — if key lookup fails hard, return 401 (auth); if Redis budget fails, fail-open forward (existing).
+1. Customer app → `https://<your-proxy>/v1/...` with:
+   - `X-TokenGuard-Key: tg_...` (**required** when `DATABASE_URL` is set)
+   - Provider auth passthrough (`Authorization: Bearer sk-...` or Anthropic `x-api-key`)
+   - `X-Budget-Bucket-Id: <bucket>` (required for enforcement; missing → fail-open)
+   - Optional `X-Request-Id`
+2. `AuthMiddleware` hashes the TokenGuard key, looks up `api_keys` + `orgs` in Postgres, attaches `org_id` + Slack webhook to context. Invalid/missing key → **401**.
+3. Pre-check reserves on Redis `budget:{org_id}:{bucket_id}` via Lua.
+4. Request forwarded upstream; response settle/release runs as before.
+5. On settle/release → row in Postgres `usage_events`; may Slack (80% / exhausted / fail-open).
+6. Operator uses `ADMIN_API_KEY` for `/admin/v1/*` and `/ops` (HTTP Basic).
 
-### 14.2 Postgres schema (minimal)
+Provider API keys are never stored. Redis budget failure → fail-open; auth failure → 401 (not fail-open).
+
+### 14.2 Packages
+
+| Package | Role |
+|---------|------|
+| `internal/store` | Postgres/memory usage + orgs/api_keys/buckets; `EnsureSchema` / `EnsureOrgSchema` at startup |
+| `internal/billing` | Stripe Checkout Session + webhook HMAC |
+| `internal/admin` | Admin REST API |
+| `internal/ops` | `GET /ops` HTML template |
+| `internal/proxy` | Reverse proxy, auth middleware, settle/release |
+| `internal/budget` | Redis Lua, alerts, list/SCAN helpers |
+
+No separate migration tool — schema applied on proxy boot when `DATABASE_URL` is set.
+
+### 14.3 Postgres schema (actual)
 
 ```
 orgs (
-  id, name, plan,  -- trial|indie|team
+  id TEXT PK, name, plan DEFAULT 'trial',  -- trial|indie|team
+  slack_webhook_url, default_bucket_id,    -- default_bucket_id column exists; NOT wired yet
   stripe_customer_id, stripe_subscription_id,
-  slack_webhook_url,
-  default_bucket_id,
-  token_quota_monthly, tokens_used_monthly,
   created_at
 )
 
 api_keys (
-  id, org_id, key_hash, key_prefix,  -- store hash only; show raw once at creation
+  id, org_id FK, key_hash UNIQUE, key_prefix,
   revoked_at, created_at
 )
 
+buckets (
+  org_id, bucket_id, created_at,
+  PRIMARY KEY (org_id, bucket_id)
+)  -- upserted on first reserve; listing uses Redis SCAN
+
 usage_events (
   id, org_id, bucket_id, request_id,
-  reserved, actual, outcome,  -- settled|released|missing_usage|denied|fail_open
+  reserved, actual, outcome,  -- settled|released|missing_usage|disconnected
   provider, created_at
 )
 ```
 
-Redis: `budget:{org_id}:{bucket_id}`, `reservation:{request_id}` (unchanged semantics; bucket_id in hash includes org scope).
+**Not implemented (post-v1):** `token_quota_monthly` / `tokens_used_monthly` enforcement; plan Indie/Team is metadata after Stripe only.
 
-### 14.3 Dump / admin API additions
+### 14.4 Redis keys (actual)
 
-| Method | Path | Auth | Purpose |
-|--------|------|------|---------|
-| GET | `/admin/v1/buckets` | Admin | List known buckets + balances for ops (scan or Postgres bucket registry) |
-| GET | `/admin/v1/usage?org_id=&bucket_id=&limit=` | Admin | Recent usage_events |
-| GET | `/admin/v1/reservations` | Admin | Held reservations (SCAN `reservation:*` or Redis helper) |
-| GET | `/ops` | Admin (cookie or Bearer) | HTML ops page |
+| Key | Format |
+|-----|--------|
+| Budget | `budget:{org_id}:{bucket_id}` (`default` if org empty) |
+| Reservation | `reservation:{request_id}` — hash `bucket_id` stores scoped `{org}:{bucket}` |
+| Warn dedupe | `alert:warn80:{org_id}:{bucket_id}` SET NX EX 3600 |
 
-Bucket registry: for v1, either track buckets in Postgres when first used / created via admin, or SCAN Redis `budget:*` for ops list. Prefer **Postgres `buckets(org_id, bucket_id)`** upserted on first reserve.
+### 14.5 HTTP surface (actual)
 
-### 14.4 Slack alerts (hosted v1)
+**Public / health**
 
-| Event | When |
-|-------|------|
+| Method | Path | Auth |
+|--------|------|------|
+| GET | `/healthz` | none |
+| GET | `/readyz` | none (503 if Redis down when enforcement on) |
+
+**LLM proxy** — catch-all `/` (except routes below)
+
+| Header | Required when hosted |
+|--------|----------------------|
+| `X-TokenGuard-Key` | Yes if `DATABASE_URL` set |
+| Provider auth | Yes (passthrough) |
+| `X-Budget-Bucket-Id` | Yes for enforce (else fail-open) |
+
+**Admin** — `Authorization: Bearer $ADMIN_API_KEY`
+
+| Method | Path |
+|--------|------|
+| GET/PUT/POST | `/admin/v1/buckets/{id}?org_id=` (get / set / topup) |
+| GET | `/admin/v1/buckets`, `/admin/v1/usage`, `/admin/v1/reservations` |
+| POST/GET | `/admin/v1/orgs` |
+| PATCH | `/admin/v1/orgs/{id}` (`slack_webhook_url`) |
+| POST | `/admin/v1/orgs/{id}/keys` |
+| POST | `/admin/v1/orgs/{id}/checkout` (`{"plan":"indie"|"team"}`) |
+
+**Billing / ops**
+
+| Method | Path | Auth |
+|--------|------|------|
+| POST | `/billing/webhook` | Stripe-Signature |
+| GET | `/ops` | HTTP Basic `admin` / `ADMIN_API_KEY` |
+
+Internal headers stripped upstream include `X-Budget-Bucket-Id`, `X-Request-Id`, `X-TokenGuard-Key`.
+
+### 14.6 Slack (actual)
+
+| Event | Trigger |
+|-------|---------|
 | `budget_exhausted` | Reserve denied in enforce |
-| `budget_warning_80` | After settle, remaining ≤ 20% of last known high-water or of configured budget cap |
-| `fail_open` | Existing CRITICAL path |
+| `budget_warning_80` | After settle, remaining ≤ 20% of (remaining + actual); 1h Redis dedupe |
+| `fail_open` | Redis/timeout/missing bucket fail-open |
 
-Use org `slack_webhook_url` when set; else fall back to global `SLACK_WEBHOOK_URL`.
+Org `slack_webhook_url` preferred; else `SLACK_WEBHOOK_URL`.
 
-### 14.5 Stripe
+### 14.7 Stripe (actual)
 
-- Products: Indie $15, Team $39 (test mode first)
-- Checkout Session → success URL shows “check email / dashboard for key” (v1: operator creates key via CLI/admin until H signup exists)
-- Webhook: `checkout.session.completed` / `customer.subscription.deleted` → update org plan
-- Enforce plan bucket count + monthly token quota using `usage_events` sum (soft warn; hard block optional in v1 — prefer soft warn + Slack)
+- Env (all required to enable): `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_INDIE`, `STRIPE_PRICE_TEAM`
+- Optional: `STRIPE_SUCCESS_URL`, `STRIPE_CANCEL_URL`
+- Admin starts Checkout → customer pays → webhook sets `plan` + Stripe IDs
+- `customer.subscription.deleted` → plan `trial`
+- **v1:** plan limits (bucket/token caps) are **not** hard-enforced in code; operator onboards keys manually after payment
 
-**v1 onboarding pragmatism:** Operator may create org + key via admin CLI/API after Stripe payment notification; self-serve key minting can be Post-v1 P1.
+### 14.8 Compose (actual)
 
-### 14.6 Minimal ops page
+Services: `redis:7`, `postgres:16`, `proxy`. Compose overrides `REDIS_URL` and `DATABASE_URL` to service DNS. Volume `pgdata`.
 
-Server-rendered HTML (Go `html/template`), no SPA:
+### 14.9 Operator onboarding flow
 
-- Table: bucket | balance
-- Table: last 50 usage_events
-- Table: open reservations (request_id, bucket, reserved, age)
-- Plain CSS, readable on mobile
+See [docs/RUNBOOK.md](docs/RUNBOOK.md): create org → mint `tg_` key → PATCH Slack → seed budget with `?org_id=` → optional Checkout → customer uses `X-TokenGuard-Key` → view `/ops`.
 
-### 14.7 Compose additions
+### 14.10 Known gaps (post-v1)
 
-```
-services: redis, postgres, proxy
-```
-
-Env: `DATABASE_URL`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, existing Redis/admin vars.
-
-### 14.8 Hosted v1 DoD
-
-See PLAN.md Hosted Product v1 Definition of Done.
+- No self-serve signup (landing → Stripe → auto key email)
+- `default_bucket_id` unused — clients must send `X-Budget-Bucket-Id`
+- No admin key-revoke endpoint (column `revoked_at` exists)
+- Plan quotas not enforced in proxy
+- One `UPSTREAM_URL` per proxy process (OpenAI **or** Anthropic)

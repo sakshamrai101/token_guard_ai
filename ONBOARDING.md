@@ -1,191 +1,116 @@
 # Client Onboarding Guide
 
-How to deploy Token Guard AI and walk a client through setup. Use this for sales demos, design partners, and production rollout.
-
-For technical architecture, see [ARCHITECTURE.md](ARCHITECTURE.md). For builder roadmap, see [PLAN.md](PLAN.md).
+How customers use **hosted TokenGuard** (your multi-tenant proxy). For operator deploy and Stripe/Slack setup, see [docs/RUNBOOK.md](docs/RUNBOOK.md). Architecture: [ARCHITECTURE.md](ARCHITECTURE.md) §14.
 
 ---
 
 ## What You're Selling
 
-> A drop-in proxy that sits between your app and OpenAI/Anthropic. Set a token budget per customer, feature, or environment. When the budget is exhausted, requests return **429** instead of hitting your API bill. If Redis goes down, your app **keeps working** (fail-open).
+> Point your OpenAI/Anthropic SDK at TokenGuard. Set a token budget. Get Slack when you're about to blow it. We settle usage in real time and return **429** when the budget is gone — without taking your app down if Redis hiccups (fail-open).
 
-**Budget unit:** raw token count (matches provider `usage` metadata).
-
-**What Token Guard is NOT (v1):** a user dashboard, billing system, or API key manager.
+**Budget unit:** raw tokens.  
+**You keep your provider API keys** — they pass through; we never store them.
 
 ---
 
-## Architecture
+## Architecture (customer view)
 
 ```text
-Your App  →  [Your API Gateway]  →  Token Guard Proxy  →  OpenAI / Anthropic
-                  │                         │
-                  │ injects                   │ Redis
-                  ▼                         ▼
-          X-Budget-Bucket-Id          budget:{bucket_id}
-          X-Request-Id
-          Authorization (passthrough)
+Your App  →  TokenGuard Proxy (hosted)  →  OpenAI / Anthropic
+               │
+               ├─ X-TokenGuard-Key: tg_...     (your TokenGuard key)
+               ├─ Authorization / x-api-key    (provider key, passthrough)
+               └─ X-Budget-Bucket-Id           (e.g. prod-chat)
 ```
 
-- Provider API keys pass through — Token Guard does not store them.
-- Bucket IDs must be injected by **your gateway or middleware**, not by end users.
+Redis holds `budget:{org_id}:{bucket_id}`. Postgres holds orgs, keys, usage history.
 
 ---
 
-## 30-Minute Setup
+## Customer setup (after you give them a key)
 
-### Step 1 — Deploy (5 min)
+### 1. What you receive from the operator
 
-```bash
-git clone <repo>
-cd token_guard_ai
-cp .env.example .env
-# Edit .env: set ADMIN_API_KEY, ENFORCEMENT_MODE=shadow, SLACK_WEBHOOK_URL (optional)
-docker compose up -d
+- Proxy base URL, e.g. `https://proxy.tokenguard.ai`
+- TokenGuard API key: `tg_...` (shown once — store securely)
+- Bucket name to use, e.g. `prod-chat`
+- Optional: Slack channel already wired to your org
+
+### 2. Point the SDK at TokenGuard
+
+**OpenAI (Python):**
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    api_key=os.environ["OPENAI_API_KEY"],           # your OpenAI key
+    base_url="https://proxy.tokenguard.ai/v1",
+    default_headers={
+        "X-TokenGuard-Key": os.environ["TG_KEY"],
+        "X-Budget-Bucket-Id": "prod-chat",
+    },
+)
+
+r = client.chat.completions.create(
+    model="gpt-4o-mini",
+    max_tokens=50,
+    messages=[{"role": "user", "content": "hi"}],
+)
+print(r.usage)
 ```
 
-Verify health:
+**curl:**
 
 ```bash
-curl http://localhost:8080/healthz   # {"status":"ok"}
-curl http://localhost:8080/readyz    # {"status":"ready"}
-```
-
-### Step 2 — Seed a budget (2 min)
-
-```bash
-export ADMIN_API_KEY=your-secret-key
-
-curl -X PUT http://localhost:8080/admin/v1/buckets/acme-corp \
-  -H "Authorization: Bearer $ADMIN_API_KEY" \
+curl -X POST https://proxy.tokenguard.ai/v1/chat/completions \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -H "X-TokenGuard-Key: $TG_KEY" \
+  -H "X-Budget-Bucket-Id: prod-chat" \
   -H "Content-Type: application/json" \
-  -d '{"balance": 500000}'
-
-curl http://localhost:8080/admin/v1/buckets/acme-corp \
-  -H "Authorization: Bearer $ADMIN_API_KEY"
-# {"bucket_id":"acme-corp","balance":500000}
+  -d '{"model":"gpt-4o-mini","max_tokens":50,"messages":[{"role":"user","content":"hi"}]}'
 ```
 
-### Step 3 — Point your app at the proxy (5 min)
+**Anthropic:** use a proxy instance with `UPSTREAM_HOST=api.anthropic.com`, same TokenGuard headers, Anthropic `x-api-key` + `anthropic-version`.
 
-| Before | After |
-|--------|-------|
-| `https://api.openai.com/v1/...` | `http://token-guard:8080/v1/...` |
-| `https://api.anthropic.com/v1/...` | separate proxy instance with `UPSTREAM_URL=https://api.anthropic.com` |
+### 3. What happens at runtime
 
-No SDK changes — same request bodies and headers (plus budget headers below).
+| Step | Behavior |
+|------|----------|
+| Auth | Invalid `tg_` key → **401** |
+| Reserve | Tokens held in Redis before upstream call |
+| Success | Usage settled; balance drops by actual tokens |
+| Exhausted (`enforce`) | **429** + Slack `budget_exhausted` |
+| Low budget | Slack `budget_warning_80` (at most once/hour) |
+| Redis down | Request still reaches provider (fail-open) + Slack CRITICAL |
 
-### Step 4 — Inject headers (10 min)
+### 4. Rollout tip
 
-Add at your gateway or app middleware:
-
-| Header | Value | Required |
-|--------|-------|----------|
-| `X-Budget-Bucket-Id` | e.g. `acme-corp`, `user-123`, `feature-chat` | Yes (for enforcement) |
-| `X-Request-Id` | UUID per request | Optional (auto-generated if omitted) |
-| `Authorization` | Provider API key | Yes (passthrough) |
-
-**Security:** Never let end users set `X-Budget-Bucket-Id` directly.
-
-### Step 5 — Shadow mode validation (24–48h)
-
-Keep `ENFORCEMENT_MODE=shadow`. Token Guard will:
-
-- Reserve and settle budgets
-- Log all decisions
-- **Never block** requests (even if budget exhausted)
-
-Monitor:
-
-```bash
-# Check balance after traffic
-curl http://localhost:8080/admin/v1/buckets/acme-corp \
-  -H "Authorization: Bearer $ADMIN_API_KEY"
-```
-
-Balance should decrease by actual `usage.total_tokens` per completion.
-
-### Step 6 — Enforce (when confident)
-
-```bash
-# In .env or docker-compose
-ENFORCEMENT_MODE=enforce
-docker compose up -d --force-recreate proxy
-```
-
-Exhausted buckets now return **429**:
-
-```json
-{"error":{"message":"budget exhausted","type":"budget_exceeded"}}
-```
-
-Your app should handle 429 gracefully (retry later, show quota message, etc.).
-
-### Step 7 — Wire alerts
-
-Set `SLACK_WEBHOOK_URL` for:
-
-- **CRITICAL:** fail-open (Redis down — enforcement paused, traffic still flows)
-- **WARN:** budget denied (429 — bucket exhausted)
+Start with operator in `ENFORCEMENT_MODE=shadow` (logs/settles, never blocks), then promote to `enforce`.
 
 ---
 
-## Rollout Checklist
-
-- [ ] Docker Compose running, `/healthz` and `/readyz` OK
-- [ ] Admin API secured with strong `ADMIN_API_KEY`
-- [ ] Budgets seeded for all active buckets
-- [ ] Gateway injects `X-Budget-Bucket-Id` (not client-supplied)
-- [ ] 24–48h in `shadow` mode; balances look correct
-- [ ] Slack alerts configured
-- [ ] App handles 429 responses
-- [ ] Promoted to `enforce`
-
----
-
-## Honest Limitations (tell clients upfront)
+## Honest limitations (tell customers)
 
 | Topic | Reality |
 |-------|---------|
-| Budget unit | Tokens, not dollars |
-| Fail-open | Redis outage = temporary loss of protection (traffic still works) |
-| Concurrency | Brief overshoot possible: up to `concurrent_requests × reservation_estimate` |
-| Providers | OpenAI + Anthropic (v1); one upstream URL per proxy instance |
-| Multi-tenancy | Bucket strings in Redis — no built-in user accounts (v1) |
-
-Transparency builds trust and prevents bad word of mouth.
+| Setup | Operator mints your key (self-serve signup is post-v1) |
+| Dashboard | Operator `/ops` for now — you get Slack + they can dump usage |
+| Providers | One upstream per proxy (OpenAI **or** Anthropic) |
+| Plan quotas | Indie/Team are billing plans; soft limits not hard-enforced in proxy yet |
+| Bucket header | You must send `X-Budget-Bucket-Id` every request |
 
 ---
 
-## Troubleshooting
+## Demo script (15 min)
 
-| Symptom | Likely cause | Fix |
-|---------|--------------|-----|
-| All requests pass despite empty budget | `ENFORCEMENT_MODE=shadow` or `off` | Set `enforce` |
-| Balance not decreasing | Settlement not running or wrong provider extractor | Check logs for `outcome=settled`; verify `UPSTREAM_HOST` |
-| 429 but budget looks fine | Reservations held (unsettled) | Wait for TTL or check upstream errors |
-| Requests pass when Redis down | Fail-open (by design) | Fix Redis; check Slack CRITICAL alert |
-| Balance wrong after errors | Release should refund on 4xx/5xx | Check upstream status codes in logs |
-
-See [docs/RUNBOOK.md](docs/RUNBOOK.md) for ops details (created during Launch-2).
+1. Show `/ops` after a few calls (balances drop by real usage)
+2. Exhaust budget → 429 + Slack
+3. Top up via admin → next call works
+4. Stop Redis briefly → app still gets LLM response (fail-open)
 
 ---
 
-## Demo Script (15 min sales call)
+## Operator path
 
-1. Show Docker Compose up in one command
-2. Seed `demo-bucket` with 5000 tokens via admin API
-3. Send 3 chat completions through proxy (shadow or enforce)
-4. Show balance dropped by exact usage via admin GET
-5. Set balance to 100, send large request → show 429
-6. Mention fail-open: "Even if Redis dies, your app keeps working — you get a Slack alert"
-
----
-
-## When They Need More (v2 conversation)
-
-- "We don't want to run Docker" → managed hosted service (Postgres + dashboard)
-- "We need dollar budgets" → cost table per model (post-v1)
-- "We need Gemini" → additional extractor (post-v1)
-- "We need audit history" → Postgres audit log (hosted v2)
+Full create-org / Stripe / VPS steps: [docs/RUNBOOK.md](docs/RUNBOOK.md).

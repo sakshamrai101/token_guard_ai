@@ -296,6 +296,8 @@ See [ONBOARDING.md](ONBOARDING.md) for full setup walkthrough.
 
 **GTM (locked):** You operate **one multi-tenant TokenGuard instance** on a VPS. Customers pay via Stripe → get a TokenGuard API key → point their SDK `base_url` at your proxy. Codebase remains deployable via Docker; you are the operator.
 
+**Status: Hosted Product v1 (H1–H6) is SHIPPED.** See [ARCHITECTURE.md](ARCHITECTURE.md) §14 for as-built design. Next work is deploy + E2E + marketing; product features from **Post–Hosted-v1** on demand.
+
 **Quality bar:** Setup in minutes (change base_url + key). Slack when budgets warn/exhaust. Usage dump + minimal ops page. No React dashboard. Learn from demand before building more.
 
 **Pricing (locked for v1):**
@@ -338,7 +340,9 @@ See [ONBOARDING.md](ONBOARDING.md) for full setup walkthrough.
 | **H5** Minimal `/ops` HTML page | **Done** |
 | **H6** Postgres in Compose + VPS deploy docs | **Done** |
 
-Do NOT combine phases. TDD each phase. `go test ./...` must stay green. Update [ARCHITECTURE.md](ARCHITECTURE.md) **after** each phase ships (not before).
+Do NOT combine phases. TDD each phase. `go test ./...` must stay green.
+
+**ARCHITECTURE.md §14 updated to match shipped code (post H6).**
 
 ---
 

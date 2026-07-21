@@ -289,3 +289,15 @@ Gemini, OpenAI-compatible picker UI, self-serve signup polish, React dashboard, 
 - Wire default bucket when X-Budget-Bucket-Id missing.
 - No React. No email sending. No Gemini.
 - TDD; all existing tests must pass; go test ./... green at end.
+
+---
+
+## A1 Customer Analytics (branch analytics)
+
+- Implement entire A1 in one changeset per PLAN.md **A1 — Customer Analytics**.
+- Customer-scoped `GET /me/buckets`, `GET /me/usage`, `GET /me/org`, `PATCH /me/slack` auth via `X-TokenGuard-Key`.
+- Minimal `/account` HTML (Go templates) — balances + recent usage + Slack update; no React SPA.
+- Org isolation mandatory — never leak cross-tenant data.
+- Do NOT implement multi-provider routing, Gemini, customer topup, or key remint in A1.
+- Operator `/ops` + admin APIs stay ADMIN_API_KEY-only.
+- TDD; all existing tests must pass; go test ./... green at end.

@@ -437,18 +437,95 @@ Do NOT combine phases. TDD each phase. `go test ./...` must stay green. Update [
 
 | Priority | Feature | Notes |
 |----------|---------|-------|
-| **S1 (NOW)** | Self-serve signup → Stripe → setup page with one-time key | See section below — **current branch `self-serve`** |
-| **P1** | Gemini native JSON + SSE extractors | After S1 |
-| **P1** | OpenAI-compatible upstream picker (Grok / custom base URL) | After S1 |
-| **P2** | Real dashboard (React) | On demand |
+| **S1** | Self-serve signup → Stripe → setup page with one-time key | **Done** — branch `self-serve` |
+| **A1 (NOW)** | Customer analytics: `/me` read APIs + minimal `/account` HTML | See **A1** below — **branch `analytics`** |
+| **P1** | One-app multi-provider routing (OpenAI + Anthropic on one deploy) | **Later — separate branch** (not A1) |
+| **P1** | Gemini native JSON + SSE extractors | After multi-provider |
+| **P1** | OpenAI-compatible upstream picker (Grok / custom base URL) | After multi-provider |
+| **P2** | Real dashboard (React) | On demand — A1 is the lean stand-in |
 | **P2** | Slack interactive top-up / email alerts | On demand |
 | **P3** | SSO, Prometheus, community self-hosted docs | Later |
 
 ---
 
+## A1 — Customer Analytics (self-serve visibility)
+
+**Branch:** `analytics`  
+**Goal:** Paying customers can inspect **their** bucket balances and recent usage **without** Slack-only alerts and **without** emailing the operator. Slack remains the push channel; `/account` + `/me` are the investigation surface.
+
+**Why now:** S1 gets them a key. Without org-scoped visibility, every “what’s my balance?” becomes a support ticket — weak for $15/mo.
+
+**Quality bar:** Customer with `tg_` key opens `/account`, pastes key (or uses header), sees org buckets + last N usage events + can update Slack webhook. Operator `/ops` (ADMIN_API_KEY) unchanged for support.
+
+### Locked decisions
+
+| Item | Choice |
+|------|--------|
+| Auth | Customer routes use `X-TokenGuard-Key` (same as LLM proxy) — **not** `ADMIN_API_KEY` |
+| Scope | Data filtered to **that org only** — never cross-tenant |
+| APIs | Read-focused first: balances + usage (+ optional Slack PATCH) |
+| UI | Minimal Go `html/template` page `/account` — **no React** |
+| Topup / remint key | **OUT of A1** (support / admin mint remains) |
+| Multi-provider routing | **OUT of A1** — separate later branch |
+| Charts / CSV export / billing portal | **OUT of A1** |
+
+### Deliverables (single changeset — do it all)
+
+1. **Customer APIs** (package e.g. `internal/account` or extend `internal/ops` with customer handlers — prefer `internal/account`)
+   - `GET /me/buckets` → `{buckets:[{bucket_id, balance}, ...]}` for authenticated org
+   - `GET /me/usage?limit=50` → recent `usage_events` for that org only (newest first)
+   - `GET /me/org` → `{org_id, plan, default_bucket_id, slack_webhook_url_set: bool}` (do **not** echo full webhook secret if avoidable — or mask)
+   - `PATCH /me/slack` → `{slack_webhook_url}` update org webhook (same validation as setup)
+2. **Auth middleware reuse**
+   - Resolve `X-TokenGuard-Key` → org (reuse `proxy.AuthMiddleware` pattern or shared lookup)
+   - Missing/invalid key → **401** JSON
+3. **Minimal `/account` HTML**
+   - `GET /account` — form or prompt for key **or** accept key via header from a small paste UI (session-less: paste `tg_` once per visit into a form that POSTs to same origin and re-renders — **no long-lived cookie store of raw key in A1** unless trivial; prefer: page explains “send requests with header” for API users + HTML form that POSTs key to `POST /account/view` which renders balances for that request only)
+   - Show: plan, default bucket, table of bucket balances, table of last 50 usage events, Slack webhook update form
+   - Plain CSS consistent with `/ops` / `/setup` (readable, mobile-ok)
+4. **Wire in `main.go` / server mux**
+   - Mount `/me/*` and `/account` when org store + Redis available (hosted mode)
+   - Do **not** proxy these paths upstream
+5. **Docs**
+   - README + ONBOARDING: “Check balances at `/account` or `GET /me/buckets`”
+   - RUNBOOK: customer self-serve vs operator `/ops`
+
+### Explicitly OUT of A1
+
+- React/SPA dashboard
+- Stripe Customer Portal / invoices UI
+- Self-serve bucket topup or balance set
+- Key remint / revoke UI
+- Email alerts
+- Multi-provider path routing (OpenAI+Anthropic one hostname)
+- Gemini / Grok
+- Hard plan quota enforcement UI
+
+### A1 Definition of Done
+
+- [x] `GET /me/buckets` with valid `tg_` key returns only that org’s balances
+- [x] `GET /me/usage` scoped to org; other orgs’ events never appear
+- [x] Invalid/missing key → 401
+- [x] `GET /account` (or view flow) shows balances + recent usage for a pasted/submitted key
+- [x] Customer can PATCH Slack webhook from `/me/slack` or account form
+- [x] Operator `/ops` and admin dump APIs still work unchanged
+- [x] Existing H1–H6 + S1 tests still pass; new unit/integration tests for `/me` scoping
+- [x] `go test ./...` green
+
+### Tests (required)
+
+- `/me/buckets` 401 without key; 200 with key; empty org → empty list
+- Two orgs: org A key never sees org B balances or usage
+- `/me/usage` limit honored; ordered newest first
+- `/me/slack` updates org webhook
+- `/account` HTML renders for valid key path; rejects invalid
+- Admin `/ops` still Basic-auth only (regression)
+
+---
+
 ## S1 — Self-Serve Onboarding (FINISHED PRODUCT FEEL)
 
-**Branch:** `self-serve`  
+**Branch:** `self-serve` (**done**)  
 **Goal:** Customer never needs the operator after landing page. Signup → pay (or trial Checkout) → see `tg_` key once → copy SDK snippet → call proxy. Feels like a finished product.
 
 **Quality bar:** Landing “Get started” completes without admin curl. Operator `/ops` remains for support only.
@@ -531,6 +608,8 @@ Do NOT combine phases. TDD each phase. `go test ./...` must stay green. Update [
 | Provider keys | Customer passthrough | TokenGuard does not store provider secrets |
 | **S1 onboarding** | **Self-serve Checkout → `/setup` one-time key** | Operator mint is support fallback only |
 | **S1 default bucket** | **`default` auto-seeded; header optional** | Missing header uses org default — not fail-open |
+| **A1 customer visibility** | **`/me` APIs + `/account` HTML (tg_ auth)** | Slack = alerts; account = investigate; no React |
+| **Multi-provider (later)** | **Separate branch after A1** | One-app OpenAI+Anthropic routing — not A1 |
 
 ---
 

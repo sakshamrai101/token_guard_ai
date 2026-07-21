@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TokenGuard — Sign up</title>
+  <style>
+    :root { --ink:#1c1917; --muted:#57534e; --accent:#0f766e; --bg:#f6f4ef; --card:#fff; --line:#d6d3d1; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family:"IBM Plex Sans",system-ui,sans-serif; background:linear-gradient(180deg,#ece7dc,#f6f4ef); color:var(--ink); min-height:100vh; }
+    main { max-width:420px; margin:0 auto; padding:3rem 1.25rem; }
+    h1 { font-size:1.75rem; margin:0 0 .35rem; letter-spacing:-.02em; }
+    p { color:var(--muted); margin:0 0 1.5rem; }
+    form { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:1.25rem; display:grid; gap:.9rem; }
+    label { font-size:.85rem; font-weight:600; color:var(--muted); display:grid; gap:.35rem; }
+    input, select { font:inherit; padding:.6rem .7rem; border:1px solid var(--line); border-radius:6px; }
+    button { font:inherit; font-weight:600; background:var(--accent); color:#fff; border:0; border-radius:6px; padding:.7rem 1rem; cursor:pointer; }
+    button:disabled { opacity:.6; cursor:wait; }
+    .err { color:#991b1b; font-size:.9rem; }
+    .note { font-size:.85rem; color:var(--muted); }
+  </style>
+</head>
+<body>
+<main>
+  <h1>TokenGuard</h1>
+  <p>Get a budget-guarded LLM proxy key in minutes.</p>
+  {{ if .Canceled }}<p class="err">Checkout canceled — try again when ready.</p>{{ end }}
+  <form id="signup-form">
+    <label>Work email
+      <input type="email" name="email" required placeholder="you@company.com" autocomplete="email">
+    </label>
+    <label>Plan
+      <select name="plan">
+        <option value="trial">Trial</option>
+        <option value="indie">Indie</option>
+        <option value="team">Team</option>
+      </select>
+    </label>
+    <button type="submit">Continue to Checkout</button>
+    <p class="note" id="status"></p>
+  </form>
+</main>
+<script>
+document.getElementById('signup-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const form = e.target;
+  const btn = form.querySelector('button');
+  const status = document.getElementById('status');
+  btn.disabled = true;
+  status.textContent = 'Starting Checkout…';
+  status.className = 'note';
+  try {
+    const res = await fetch('/signup/checkout', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        email: form.email.value,
+        plan: form.plan.value,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.url) {
+      throw new Error(data.error || 'Checkout failed');
+    }
+    window.location = data.url;
+  } catch (err) {
+    status.textContent = err.message || String(err);
+    status.className = 'err';
+    btn.disabled = false;
+  }
+});
+</script>
+</body>
+</html>

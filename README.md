@@ -19,6 +19,8 @@ Provider routing is by `UPSTREAM_HOST`: `api.openai.com` → OpenAI extractors; 
 
 See [PLAN.md](PLAN.md), [ARCHITECTURE.md](ARCHITECTURE.md), [ONBOARDING.md](ONBOARDING.md), and [docs/RUNBOOK.md](docs/RUNBOOK.md).
 
+**Self-serve (S1):** Customers use `/signup` → Stripe Checkout → `/setup?session_id=` (one-time `tg_` key). Admin mint is support fallback only.
+
 ## Docker quick start (proxy + Redis + Postgres)
 
 **Requirements:** Docker + Docker Compose
@@ -36,39 +38,30 @@ docker compose ps                    # proxy, redis, postgres
 
 Compose injects `DATABASE_URL` and `REDIS_URL` for in-network hostnames. Schema auto-migrates on startup. With Postgres enabled, **LLM calls require `X-TokenGuard-Key`**.
 
-### Hosted quickstart (org + key + LLM call)
+### Hosted quickstart (self-serve)
+
+Set Stripe + `PUBLIC_BASE_URL` in `.env`, then:
 
 ```bash
-export ADMIN_API_KEY=change-me-to-a-long-random-secret   # match .env
+# Terminal A — webhook forward
+stripe listen --forward-to localhost:8080/billing/webhook
+# put printed whsec_… into STRIPE_WEBHOOK_SECRET and restart proxy
 
-# 1. Create org
-ORG_ID=$(curl -s -X POST http://localhost:8080/admin/v1/orgs \
-  -H "Authorization: Bearer $ADMIN_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"name":"Acme"}' | jq -r .id)
+# Browser: http://localhost:8080/signup  → Checkout → /setup?session_id=…
+# Copy tg_ key once from /setup
 
-# 2. Mint TokenGuard key (store raw key once)
-TG_KEY=$(curl -s -X POST http://localhost:8080/admin/v1/orgs/$ORG_ID/keys \
-  -H "Authorization: Bearer $ADMIN_API_KEY" | jq -r .key)
-
-# 3. Seed budget for this org
-curl -s -X PUT "http://localhost:8080/admin/v1/buckets/my-app?org_id=$ORG_ID" \
-  -H "Authorization: Bearer $ADMIN_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"balance": 50000}'
-
-# 4. Call the proxy (provider key + TokenGuard key)
 curl -X POST http://localhost:8080/v1/chat/completions \
   -H "Authorization: Bearer $OPENAI_API_KEY" \
   -H "X-TokenGuard-Key: $TG_KEY" \
-  -H "X-Budget-Bucket-Id: my-app" \
   -H "Content-Type: application/json" \
   -d '{"model":"gpt-4o-mini","max_tokens":50,"messages":[{"role":"user","content":"hi"}]}'
 ```
 
+`X-Budget-Bucket-Id` is optional — seeded bucket `default` is used when omitted.
+
 **Ops UI:** [http://localhost:8080/ops](http://localhost:8080/ops) — Basic auth user `admin`, password = `ADMIN_API_KEY`.
 
-Full operator flow (Slack, Stripe Checkout, VPS): [docs/RUNBOOK.md](docs/RUNBOOK.md).
+Admin mint (org/key/budget) remains for support only — see [docs/RUNBOOK.md](docs/RUNBOOK.md).
 
 ### Self-hosted without Postgres
 
@@ -113,10 +106,10 @@ go run ./cmd/proxy/
 | Header | Purpose |
 |--------|---------|
 | `X-TokenGuard-Key` | Hosted auth (`tg_…`); required when `DATABASE_URL` is set |
-| `X-Budget-Bucket-Id` | Bucket to charge (gateway-injected in prod) |
+| `X-Budget-Bucket-Id` | Bucket to charge; optional when org has default (`default` after signup) |
 | `X-Request-Id` | Idempotency key (auto-generated UUID if omitted) |
 
-Do not trust client-supplied bucket IDs in production — inject at your gateway. Never put the TokenGuard key in the provider `Authorization` header.
+Never put the TokenGuard key in the provider `Authorization` header.
 
 ## Enforcement modes
 
@@ -166,6 +159,8 @@ See [.env.example](.env.example) for all variables. Key settings:
 | `REDIS_URL` | `redis://localhost:6379` | Redis connection URL |
 | `DATABASE_URL` | — | Postgres; enables multi-tenant auth |
 | `ADMIN_API_KEY` | — | Bearer for `/admin/*`; Basic password for `/ops` |
+| `PUBLIC_BASE_URL` | `http://localhost:8080` | Browser base for `/signup`, `/setup` snippets, Stripe redirects |
+| `TRIAL_BUDGET_TOKENS` | `200000` | Redis seed for `budget:{org}:default` on signup |
 | `RESERVATION_TTL_SEC` | `300` | Unsettled hold expiry |
 | `DEFAULT_RESERVATION_ESTIMATE` | `4096` | Fallback when `max_tokens` absent |
 | `PROMPT_TOKEN_BUFFER` | `512` | Added to parsed `max_tokens` |
@@ -173,7 +168,8 @@ See [.env.example](.env.example) for all variables. Key settings:
 | `SLACK_WEBHOOK_URL` | — | Global Slack fallback |
 | `STRIPE_SECRET_KEY` | — | Enables Checkout when set with webhook + prices |
 | `STRIPE_WEBHOOK_SECRET` | — | `/billing/webhook` signature |
-| `STRIPE_PRICE_INDIE` / `STRIPE_PRICE_TEAM` | — | Stripe Price IDs |
+| `STRIPE_PRICE_INDIE` / `STRIPE_PRICE_TEAM` | — | Stripe Price IDs (`indie` also used for `trial`) |
+| `STRIPE_SUCCESS_URL` | `{PUBLIC_BASE_URL}/setup?session_id={CHECKOUT_SESSION_ID}` | Must include `{CHECKOUT_SESSION_ID}` |
 
 ## Health checks
 
@@ -194,11 +190,12 @@ go build -o bin/proxy ./cmd/proxy/
 cmd/proxy/          Entry point
 internal/
   admin/            Admin API
-  billing/          Stripe Checkout + webhook
+  billing/          Stripe Checkout + webhook + provisioning
   budget/           Redis client, Lua scripts, alerts
   config/           Environment-based configuration
   ops/              /ops HTML page
   proxy/            Reverse proxy, enforcement, settlement
+  signup/           Public /signup + /setup
   store/            Postgres + memory usage/org stores
   usage/            OpenAI + Anthropic usage extractors
 test/integration/   End-to-end tests

@@ -742,11 +742,9 @@ Use org `slack_webhook_url` when set; else fall back to global `SLACK_WEBHOOK_UR
 ### 14.5 Stripe
 
 - Products: Indie $15, Team $39 (test mode first)
-- Checkout Session → success URL shows “check email / dashboard for key” (v1: operator creates key via CLI/admin until H signup exists)
+- Admin Checkout still available for support
+- **S1:** public signup Checkout + webhook **auto-provisions** org, `tg_` key, default bucket, trial seed, one-time `/setup` reveal (see §15)
 - Webhook: `checkout.session.completed` / `customer.subscription.deleted` → update org plan
-- Enforce plan bucket count + monthly token quota using `usage_events` sum (soft warn; hard block optional in v1 — prefer soft warn + Slack)
-
-**v1 onboarding pragmatism:** Operator may create org + key via admin CLI/API after Stripe payment notification; self-serve key minting can be Post-v1 P1.
 
 ### 14.6 Minimal ops page
 
@@ -756,6 +754,7 @@ Server-rendered HTML (Go `html/template`), no SPA:
 - Table: last 50 usage_events
 - Table: open reservations (request_id, bucket, reserved, age)
 - Plain CSS, readable on mobile
+- Auth: HTTP Basic `admin` / `ADMIN_API_KEY`
 
 ### 14.7 Compose additions
 
@@ -763,8 +762,50 @@ Server-rendered HTML (Go `html/template`), no SPA:
 services: redis, postgres, proxy
 ```
 
-Env: `DATABASE_URL`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, existing Redis/admin vars.
+Env: `DATABASE_URL`, `STRIPE_*`, `PUBLIC_BASE_URL`, `TRIAL_BUDGET_TOKENS`, existing Redis/admin vars.
 
 ### 14.8 Hosted v1 DoD
 
-See PLAN.md Hosted Product v1 Definition of Done.
+See PLAN.md Hosted Product v1 Definition of Done (H1–H6 **shipped**).
+
+### 14.9 Known gaps
+
+| Gap | Status |
+|-----|--------|
+| Self-serve signup | **S1 — current branch `self-serve`** (§15) |
+| `default_bucket_id` unused | **S1 — wire** |
+| Plan quotas hard-enforced | Post-S1 |
+| Key revoke admin API | Post-S1 |
+| One UPSTREAM_URL per process | By design |
+
+---
+
+## 15. S1 Self-Serve Onboarding Architecture
+
+### 15.1 End-to-end flow
+
+1. User → `GET /signup` (email + plan) → `POST /signup/checkout`.
+2. Stripe Checkout; `success_url = {PUBLIC_BASE_URL}/setup?session_id={CHECKOUT_SESSION_ID}`.
+3. `POST /billing/webhook` on `checkout.session.completed`:
+   - Create org from customer email if needed
+   - Mint `tg_` key (store hash only)
+   - Set `default_bucket_id=default`; upsert `buckets`; Redis `budget:{org_id}:default = TRIAL_BUDGET_TOKENS`
+   - Redis `SET setup:session:{session_id} <raw_tg_key> EX 900`
+   - Persist Stripe IDs + plan
+4. Browser `GET /setup?session_id=` → GETDEL one-time key → HTML with key + SDK snippets + optional Slack webhook form.
+5. App calls proxy with `X-TokenGuard-Key` only → missing `X-Budget-Bucket-Id` resolves to org default `default`.
+
+### 15.2 Routes
+
+| Method | Path | Auth |
+|--------|------|------|
+| GET | `/signup` | Public HTML |
+| POST | `/signup/checkout` | Public |
+| GET | `/setup` | Public (session_id is the secret) |
+| POST | `/setup/slack` | Public + session or setup token |
+
+### 15.3 Implementation notes
+
+- Package: `internal/signup` (handlers + templates); extend `internal/billing` webhook provisioning; extend proxy for default bucket.
+- Do not re-show plaintext key after first `/setup` load.
+- Admin org/key mint remains for operator support only.

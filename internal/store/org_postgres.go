@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -12,6 +13,7 @@ func (s *PostgresUsageStore) EnsureOrgSchema(ctx context.Context) error {
 CREATE TABLE IF NOT EXISTS orgs (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
+    email TEXT NOT NULL DEFAULT '',
     plan TEXT NOT NULL DEFAULT 'trial',
     slack_webhook_url TEXT NOT NULL DEFAULT '',
     default_bucket_id TEXT NOT NULL DEFAULT '',
@@ -40,42 +42,83 @@ CREATE TABLE IF NOT EXISTS buckets (
 	if _, err := s.db.ExecContext(ctx, q); err != nil {
 		return fmt.Errorf("ensure org schema: %w", err)
 	}
-	// Migrate existing installs that predate Stripe / slack columns.
 	alters := []string{
+		`ALTER TABLE orgs ADD COLUMN IF NOT EXISTS email TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE orgs ADD COLUMN IF NOT EXISTS slack_webhook_url TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE orgs ADD COLUMN IF NOT EXISTS default_bucket_id TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE orgs ADD COLUMN IF NOT EXISTS stripe_customer_id TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE orgs ADD COLUMN IF NOT EXISTS stripe_subscription_id TEXT NOT NULL DEFAULT ''`,
 		`CREATE INDEX IF NOT EXISTS orgs_stripe_subscription_id_idx ON orgs (stripe_subscription_id)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS orgs_email_unique_idx ON orgs (email) WHERE email <> ''`,
 	}
 	for _, stmt := range alters {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("migrate org stripe columns: %w", err)
+			return fmt.Errorf("migrate org columns: %w", err)
 		}
 	}
 	return nil
 }
 
+func scanOrg(scanner interface {
+	Scan(dest ...any) error
+}) (Org, error) {
+	var o Org
+	err := scanner.Scan(&o.ID, &o.Name, &o.Email, &o.Plan, &o.SlackWebhookURL, &o.DefaultBucketID,
+		&o.StripeCustomerID, &o.StripeSubscriptionID, &o.CreatedAt)
+	return o, err
+}
+
+const orgSelectCols = `id, name, email, plan, slack_webhook_url, default_bucket_id,
+       stripe_customer_id, stripe_subscription_id, created_at`
+
 func (s *PostgresUsageStore) CreateOrg(ctx context.Context, name string) (Org, error) {
+	return s.CreateOrgWithEmail(ctx, name, "")
+}
+
+func (s *PostgresUsageStore) CreateOrgWithEmail(ctx context.Context, name, email string) (Org, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	if email != "" {
+		if existing, err := s.FindOrgByEmail(ctx, email); err == nil {
+			return existing, nil
+		} else if err != ErrNotFound {
+			return Org{}, err
+		}
+	}
 	id, err := newID("org_")
 	if err != nil {
 		return Org{}, err
 	}
 	now := time.Now().UTC()
 	_, err = s.db.ExecContext(ctx, `
-INSERT INTO orgs (id, name, plan, created_at) VALUES ($1, $2, 'trial', $3)
-`, id, name, now)
+INSERT INTO orgs (id, name, email, plan, created_at) VALUES ($1, $2, $3, 'trial', $4)
+`, id, name, email, now)
 	if err != nil {
 		return Org{}, fmt.Errorf("insert org: %w", err)
 	}
-	return Org{ID: id, Name: name, Plan: "trial", CreatedAt: now}, nil
+	return Org{ID: id, Name: name, Email: email, Plan: "trial", CreatedAt: now}, nil
+}
+
+func (s *PostgresUsageStore) FindOrgByEmail(ctx context.Context, email string) (Org, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	if email == "" {
+		return Org{}, ErrNotFound
+	}
+	row := s.db.QueryRowContext(ctx, `
+SELECT `+orgSelectCols+` FROM orgs WHERE email = $1
+`, email)
+	o, err := scanOrg(row)
+	if err == sql.ErrNoRows {
+		return Org{}, ErrNotFound
+	}
+	if err != nil {
+		return Org{}, err
+	}
+	return o, nil
 }
 
 func (s *PostgresUsageStore) ListOrgs(ctx context.Context) ([]Org, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, name, plan, slack_webhook_url, default_bucket_id,
-       stripe_customer_id, stripe_subscription_id, created_at
-FROM orgs ORDER BY created_at ASC
+SELECT `+orgSelectCols+` FROM orgs ORDER BY created_at ASC
 `)
 	if err != nil {
 		return nil, fmt.Errorf("list orgs: %w", err)
@@ -83,9 +126,8 @@ FROM orgs ORDER BY created_at ASC
 	defer rows.Close()
 	var out []Org
 	for rows.Next() {
-		var o Org
-		if err := rows.Scan(&o.ID, &o.Name, &o.Plan, &o.SlackWebhookURL, &o.DefaultBucketID,
-			&o.StripeCustomerID, &o.StripeSubscriptionID, &o.CreatedAt); err != nil {
+		o, err := scanOrg(rows)
+		if err != nil {
 			return nil, err
 		}
 		out = append(out, o)
@@ -94,13 +136,10 @@ FROM orgs ORDER BY created_at ASC
 }
 
 func (s *PostgresUsageStore) GetOrg(ctx context.Context, orgID string) (Org, error) {
-	var o Org
-	err := s.db.QueryRowContext(ctx, `
-SELECT id, name, plan, slack_webhook_url, default_bucket_id,
-       stripe_customer_id, stripe_subscription_id, created_at
-FROM orgs WHERE id = $1
-`, orgID).Scan(&o.ID, &o.Name, &o.Plan, &o.SlackWebhookURL, &o.DefaultBucketID,
-		&o.StripeCustomerID, &o.StripeSubscriptionID, &o.CreatedAt)
+	row := s.db.QueryRowContext(ctx, `
+SELECT `+orgSelectCols+` FROM orgs WHERE id = $1
+`, orgID)
+	o, err := scanOrg(row)
 	if err == sql.ErrNoRows {
 		return Org{}, ErrNotFound
 	}
@@ -122,6 +161,20 @@ UPDATE orgs SET slack_webhook_url = $2 WHERE id = $1
 		return Org{}, ErrNotFound
 	}
 	return s.GetOrg(ctx, orgID)
+}
+
+func (s *PostgresUsageStore) SetDefaultBucket(ctx context.Context, orgID, bucketID string) error {
+	res, err := s.db.ExecContext(ctx, `
+UPDATE orgs SET default_bucket_id = $2 WHERE id = $1
+`, orgID, bucketID)
+	if err != nil {
+		return fmt.Errorf("set default bucket: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (s *PostgresUsageStore) ApplyCheckoutCompleted(ctx context.Context, orgID, plan, customerID, subscriptionID string) error {
@@ -191,16 +244,15 @@ func (s *PostgresUsageStore) LookupAPIKey(ctx context.Context, rawKey string) (A
 	}
 	hash := HashAPIKey(rawKey)
 	var (
-		keyID, orgID, prefix, plan string
-		revoked                    sql.NullTime
+		keyID, orgID, prefix, plan, slackURL, defaultBucket string
+		revoked                                             sql.NullTime
 	)
-	var slackURL string
 	err := s.db.QueryRowContext(ctx, `
-SELECT k.id, k.org_id, k.key_prefix, k.revoked_at, o.plan, o.slack_webhook_url
+SELECT k.id, k.org_id, k.key_prefix, k.revoked_at, o.plan, o.slack_webhook_url, o.default_bucket_id
 FROM api_keys k
 JOIN orgs o ON o.id = k.org_id
 WHERE k.key_hash = $1
-`, hash).Scan(&keyID, &orgID, &prefix, &revoked, &plan, &slackURL)
+`, hash).Scan(&keyID, &orgID, &prefix, &revoked, &plan, &slackURL, &defaultBucket)
 	if err == sql.ErrNoRows {
 		return AuthResult{}, ErrInvalidAPIKey
 	}
@@ -216,6 +268,7 @@ WHERE k.key_hash = $1
 		KeyID:           keyID,
 		KeyPrefix:       prefix,
 		SlackWebhookURL: slackURL,
+		DefaultBucketID: defaultBucket,
 	}, nil
 }
 

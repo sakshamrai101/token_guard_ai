@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 )
@@ -10,6 +11,7 @@ import (
 type MemoryOrgStore struct {
 	mu      sync.Mutex
 	orgs    map[string]Org
+	byEmail map[string]string // email → org id
 	keys    map[string]APIKey // keyed by hash
 	buckets map[string]struct{}
 }
@@ -17,14 +19,26 @@ type MemoryOrgStore struct {
 func NewMemoryOrgStore() *MemoryOrgStore {
 	return &MemoryOrgStore{
 		orgs:    make(map[string]Org),
+		byEmail: make(map[string]string),
 		keys:    make(map[string]APIKey),
 		buckets: make(map[string]struct{}),
 	}
 }
 
-func (s *MemoryOrgStore) CreateOrg(_ context.Context, name string) (Org, error) {
+func (s *MemoryOrgStore) CreateOrg(ctx context.Context, name string) (Org, error) {
+	return s.CreateOrgWithEmail(ctx, name, "")
+}
+
+func (s *MemoryOrgStore) CreateOrgWithEmail(_ context.Context, name, email string) (Org, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	email = strings.ToLower(strings.TrimSpace(email))
+	if email != "" {
+		if id, ok := s.byEmail[email]; ok {
+			return s.orgs[id], nil
+		}
+	}
 
 	id, err := newID("org_")
 	if err != nil {
@@ -33,11 +47,26 @@ func (s *MemoryOrgStore) CreateOrg(_ context.Context, name string) (Org, error) 
 	org := Org{
 		ID:        id,
 		Name:      name,
+		Email:     email,
 		Plan:      "trial",
 		CreatedAt: time.Now().UTC(),
 	}
 	s.orgs[id] = org
+	if email != "" {
+		s.byEmail[email] = id
+	}
 	return org, nil
+}
+
+func (s *MemoryOrgStore) FindOrgByEmail(_ context.Context, email string) (Org, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	email = strings.ToLower(strings.TrimSpace(email))
+	id, ok := s.byEmail[email]
+	if !ok {
+		return Org{}, ErrNotFound
+	}
+	return s.orgs[id], nil
 }
 
 func (s *MemoryOrgStore) ListOrgs(_ context.Context) ([]Org, error) {
@@ -70,6 +99,18 @@ func (s *MemoryOrgStore) UpdateOrgSlackWebhook(_ context.Context, orgID, webhook
 	o.SlackWebhookURL = webhookURL
 	s.orgs[orgID] = o
 	return o, nil
+}
+
+func (s *MemoryOrgStore) SetDefaultBucket(_ context.Context, orgID, bucketID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	o, ok := s.orgs[orgID]
+	if !ok {
+		return ErrNotFound
+	}
+	o.DefaultBucketID = bucketID
+	s.orgs[orgID] = o
+	return nil
 }
 
 func (s *MemoryOrgStore) ApplyCheckoutCompleted(_ context.Context, orgID, plan, customerID, subscriptionID string) error {
@@ -150,6 +191,7 @@ func (s *MemoryOrgStore) LookupAPIKey(_ context.Context, rawKey string) (AuthRes
 		KeyID:           key.ID,
 		KeyPrefix:       key.KeyPrefix,
 		SlackWebhookURL: org.SlackWebhookURL,
+		DefaultBucketID: org.DefaultBucketID,
 	}, nil
 }
 

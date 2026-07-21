@@ -12,6 +12,7 @@ const (
 	orgIDContextKey      ctxKey = "org_id"
 	orgPlanContextKey    ctxKey = "org_plan"
 	orgWebhookContextKey ctxKey = "org_webhook"
+	defaultBucketCtxKey  ctxKey = "default_bucket"
 )
 
 // KeyLookup resolves a TokenGuard API key to an org.
@@ -43,6 +44,11 @@ func (m *AuthMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := context.WithValue(r.Context(), orgIDContextKey, auth.OrgID)
 	ctx = context.WithValue(ctx, orgPlanContextKey, auth.Plan)
 	ctx = context.WithValue(ctx, orgWebhookContextKey, auth.SlackWebhookURL)
+	defaultBucket := auth.DefaultBucketID
+	if defaultBucket == "" {
+		defaultBucket = store.DefaultBucketName
+	}
+	ctx = context.WithValue(ctx, defaultBucketCtxKey, defaultBucket)
 	m.next.ServeHTTP(w, r.WithContext(ctx))
 }
 
@@ -58,6 +64,13 @@ func OrgWebhookFromContext(ctx context.Context) string {
 		return v
 	}
 	return ""
+}
+
+func DefaultBucketFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(defaultBucketCtxKey).(string); ok && v != "" {
+		return v
+	}
+	return store.DefaultBucketName
 }
 
 func writeAuthError(w http.ResponseWriter, status int, msg string) {

@@ -74,7 +74,7 @@ func TestSlackFailOpenFiresOnce(t *testing.T) {
 	defer slack.Close()
 
 	var upstreamHits atomic.Int32
-	ts, _, orgs := newSlackStack(t, "", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts, mr, orgs := newSlackStack(t, "", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upstreamHits.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"choices":[],"usage":{"total_tokens":10}}`)
@@ -83,6 +83,11 @@ func TestSlackFailOpenFiresOnce(t *testing.T) {
 	org, _ := orgs.CreateOrg(context.Background(), "Acme")
 	_, _ = orgs.UpdateOrgSlackWebhook(context.Background(), org.ID, slack.URL)
 	key, _, _ := orgs.CreateAPIKey(context.Background(), org.ID)
+	_ = orgs.SetDefaultBucket(context.Background(), org.ID, "default")
+	mr.Set("budget:"+org.ID+":default", "100000")
+
+	// Close Redis so pre-check fails open (missing bucket no longer fail-opens when default exists).
+	mr.Close()
 
 	reqBody := []byte(`{"model":"gpt-4o","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`)
 	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/v1/chat/completions", bytes.NewReader(reqBody))

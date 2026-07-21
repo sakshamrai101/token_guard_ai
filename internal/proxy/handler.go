@@ -138,6 +138,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	bucketID := r.Header.Get("X-Budget-Bucket-Id")
 	orgID := OrgIDFromContext(r.Context())
 	orgWebhook := OrgWebhookFromContext(r.Context())
+	if bucketID == "" {
+		// Prefer org default (self-serve); do not fail-open solely for missing header.
+		if _, ok := r.Context().Value(orgIDContextKey).(string); ok {
+			bucketID = DefaultBucketFromContext(r.Context())
+		}
+	}
 
 	body, restored, err := budget.ReadAndRestoreBody(r.Body)
 	if err != nil {

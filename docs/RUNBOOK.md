@@ -31,80 +31,59 @@ Tear down: `docker compose down` (add `-v` to wipe the Postgres volume).
 2. Clone the repo; `cp .env.example .env`.
 3. Set at least:
    - `ADMIN_API_KEY` — long random secret
+   - `PUBLIC_BASE_URL` — public browser URL (e.g. `https://proxy.yourdomain`)
    - `ENFORCEMENT_MODE=shadow` (then `enforce` after soak)
    - `UPSTREAM_URL` / `UPSTREAM_HOST` for your provider
-   - Optional: Stripe + `SLACK_WEBHOOK_URL`
+   - Stripe (`STRIPE_*`) for self-serve signup; optional `SLACK_WEBHOOK_URL`
+   - `TRIAL_BUDGET_TOKENS` (default `200000`) if you want a non-default seed
 4. Open firewall for `8080` (or terminate TLS on nginx/Caddy → `127.0.0.1:8080`).
 5. `docker compose up -d --build`
 6. Point Stripe webhook to `https://your.domain/billing/webhook` (or use Stripe CLI while testing).
-7. Create org → key → seed budget → send a test LLM call (steps below).
-8. Confirm `/ops` and `/readyz`.
+7. Confirm `/signup`, `/ops`, and `/readyz`. Smoke a Checkout → `/setup` reveal → LLM call.
 
 Do **not** expose Redis or Postgres publicly.
 
 ---
 
-## Hosted onboarding (org → key → Slack → Checkout → /ops)
+## Self-serve onboarding (primary)
 
-All admin calls use `Authorization: Bearer $ADMIN_API_KEY`.
+Customers never need operator curl.
 
-### 1. Create org
+1. Set Stripe env vars. Success URL **must** include `{CHECKOUT_SESSION_ID}`:
+
+   ```
+   STRIPE_SUCCESS_URL={PUBLIC_BASE_URL}/setup?session_id={CHECKOUT_SESSION_ID}
+   STRIPE_CANCEL_URL={PUBLIC_BASE_URL}/signup?canceled=1
+   ```
+
+   If unset, defaults derive from `PUBLIC_BASE_URL`.
+
+2. Local webhook forward:
+
+   ```bash
+   stripe listen --forward-to localhost:8080/billing/webhook
+   # put printed whsec_… into STRIPE_WEBHOOK_SECRET and recreate proxy
+   ```
+
+3. Browser: `http://localhost:8080/signup` → email + plan → Checkout.
+
+4. After payment, Stripe redirects to `/setup?session_id=cs_…`. Copy the `tg_` key **once** (optional Slack form). Second visit → already revealed / expired.
+
+5. Webhook (`checkout.session.completed`) provisions: org (by email), hashed key, `default` bucket, Redis `budget:{org_id}:default` = `TRIAL_BUDGET_TOKENS`, one-time setup secret TTL 15m.
+
+6. Customer LLM call (bucket header optional):
 
 ```bash
-curl -s -X POST http://localhost:8080/admin/v1/orgs \
-  -H "Authorization: Bearer $ADMIN_API_KEY" \
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -H "X-TokenGuard-Key: $TG_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"name":"Acme"}'
-# → {"id":"org_…","name":"Acme","plan":"trial",…}
-export ORG_ID=org_…   # from response
+  -d '{"model":"gpt-4o-mini","max_tokens":50,"messages":[{"role":"user","content":"hi"}]}'
 ```
 
-### 2. Create TokenGuard API key (raw key shown once)
+Missing/invalid `X-TokenGuard-Key` → **401** (when Postgres / multi-tenant is enabled).
 
-```bash
-curl -s -X POST http://localhost:8080/admin/v1/orgs/$ORG_ID/keys \
-  -H "Authorization: Bearer $ADMIN_API_KEY"
-# → {"key":"tg_…","warning":"store this key now; …"}
-export TG_KEY=tg_…
-```
-
-### 3. Optional: per-org Slack webhook
-
-```bash
-curl -s -X PATCH http://localhost:8080/admin/v1/orgs/$ORG_ID \
-  -H "Authorization: Bearer $ADMIN_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"slack_webhook_url":"https://hooks.slack.com/services/..."}'
-```
-
-### 4. Seed budget (org-scoped Redis key)
-
-```bash
-curl -s -X PUT "http://localhost:8080/admin/v1/buckets/my-app?org_id=$ORG_ID" \
-  -H "Authorization: Bearer $ADMIN_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"balance": 50000}'
-```
-
-### 5. Optional: Stripe Checkout (Indie / Team)
-
-Requires `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_INDIE`, `STRIPE_PRICE_TEAM`.
-
-```bash
-# Local webhook forward
-stripe listen --forward-to localhost:8080/billing/webhook
-# put printed whsec_… into STRIPE_WEBHOOK_SECRET and recreate proxy
-
-curl -s -X POST http://localhost:8080/admin/v1/orgs/$ORG_ID/checkout \
-  -H "Authorization: Bearer $ADMIN_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"plan":"indie"}'
-# → {"url":"https://checkout.stripe.com/…"}  open in browser
-```
-
-On `checkout.session.completed`, org `plan` becomes `indie` or `team`. Subscription deleted → `trial`.
-
-### 6. Ops page
+### Ops page
 
 Browser: `http://localhost:8080/ops`  
 Username: `admin` · Password: value of `ADMIN_API_KEY`
@@ -113,18 +92,44 @@ Username: `admin` · Password: value of `ADMIN_API_KEY`
 curl -u "admin:$ADMIN_API_KEY" http://localhost:8080/ops
 ```
 
-### 7. Customer LLM call
+---
+
+## Support fallback (admin mint)
+
+Use when a customer lost their one-time key or needs a manual org. All admin calls use `Authorization: Bearer $ADMIN_API_KEY`.
+
+### 1. Create org + key + seed
 
 ```bash
-curl -X POST http://localhost:8080/v1/chat/completions \
-  -H "Authorization: Bearer $OPENAI_API_KEY" \
-  -H "X-TokenGuard-Key: $TG_KEY" \
-  -H "X-Budget-Bucket-Id: my-app" \
+ORG_ID=$(curl -s -X POST http://localhost:8080/admin/v1/orgs \
+  -H "Authorization: Bearer $ADMIN_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"model":"gpt-4o-mini","max_tokens":50,"messages":[{"role":"user","content":"hi"}]}'
+  -d '{"name":"Acme"}' | jq -r .id)
+
+TG_KEY=$(curl -s -X POST http://localhost:8080/admin/v1/orgs/$ORG_ID/keys \
+  -H "Authorization: Bearer $ADMIN_API_KEY" | jq -r .key)
+
+curl -s -X PUT "http://localhost:8080/admin/v1/buckets/default?org_id=$ORG_ID" \
+  -H "Authorization: Bearer $ADMIN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"balance": 200000}'
 ```
 
-Missing/invalid `X-TokenGuard-Key` → **401** (when Postgres / multi-tenant is enabled).
+### 2. Optional: Slack + admin Checkout upgrade
+
+```bash
+curl -s -X PATCH http://localhost:8080/admin/v1/orgs/$ORG_ID \
+  -H "Authorization: Bearer $ADMIN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"slack_webhook_url":"https://hooks.slack.com/services/..."}'
+
+curl -s -X POST http://localhost:8080/admin/v1/orgs/$ORG_ID/checkout \
+  -H "Authorization: Bearer $ADMIN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"plan":"indie"}'
+```
+
+Admin Checkout still works (`metadata.org_id`). Public signup uses email metadata. On `customer.subscription.deleted`, plan returns to `trial`.
 
 ---
 
@@ -235,5 +240,6 @@ Per-org webhook preferred; else global `SLACK_WEBHOOK_URL`.
 - [ ] Redis and Postgres not public
 - [ ] TLS in front of proxy
 - [ ] Customers use `X-TokenGuard-Key`; provider `Authorization` is passthrough only
-- [ ] Prefer gateway-injected `X-Budget-Bucket-Id`
+- [ ] `PUBLIC_BASE_URL` + Stripe success URL include `{CHECKOUT_SESSION_ID}` for `/setup`
+- [ ] Bucket header optional after signup (`default`); prefer gateway injection for multi-bucket apps
 - [ ] Provider secrets never logged

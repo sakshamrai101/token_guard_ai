@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -42,6 +43,9 @@ type Config struct {
 	StripePriceTeam      string
 	StripeSuccessURL     string
 	StripeCancelURL      string
+
+	PublicBaseURL    string
+	TrialBudgetTokens int64
 }
 
 func Load() (Config, error) {
@@ -97,10 +101,18 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("PROMPT_TOKEN_BUFFER: %w", err)
 	}
+	trialBudget, err := strconv.ParseInt(getEnv("TRIAL_BUDGET_TOKENS", "200000"), 10, 64)
+	if err != nil {
+		return Config{}, fmt.Errorf("TRIAL_BUDGET_TOKENS: %w", err)
+	}
 
 	if mode != EnforcementOff && redisURL == "" {
 		return Config{}, fmt.Errorf("REDIS_URL is required when ENFORCEMENT_MODE is not off")
 	}
+
+	publicBase := strings.TrimRight(getEnv("PUBLIC_BASE_URL", "http://localhost:8080"), "/")
+	defaultSuccess := publicBase + "/setup?session_id={CHECKOUT_SESSION_ID}"
+	defaultCancel := publicBase + "/signup?canceled=1"
 
 	return Config{
 		ListenAddr:            getEnv("LISTEN_ADDR", ":8080"),
@@ -125,8 +137,10 @@ func Load() (Config, error) {
 		StripeWebhookSecret:   getEnv("STRIPE_WEBHOOK_SECRET", ""),
 		StripePriceIndie:      getEnv("STRIPE_PRICE_INDIE", ""),
 		StripePriceTeam:       getEnv("STRIPE_PRICE_TEAM", ""),
-		StripeSuccessURL:      getEnv("STRIPE_SUCCESS_URL", "http://localhost:8080/?checkout=success"),
-		StripeCancelURL:       getEnv("STRIPE_CANCEL_URL", "http://localhost:8080/?checkout=cancel"),
+		StripeSuccessURL:      getEnv("STRIPE_SUCCESS_URL", defaultSuccess),
+		StripeCancelURL:       getEnv("STRIPE_CANCEL_URL", defaultCancel),
+		PublicBaseURL:         publicBase,
+		TrialBudgetTokens:     trialBudget,
 	}, nil
 }
 

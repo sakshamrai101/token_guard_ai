@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TokenGuard — Setup</title>
+  <style>
+    :root { --ink:#1c1917; --muted:#57534e; --accent:#0f766e; --bg:#f6f4ef; --card:#fff; --line:#d6d3d1; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family:"IBM Plex Sans",system-ui,sans-serif; background:linear-gradient(180deg,#ece7dc,#f6f4ef); color:var(--ink); }
+    main { max-width:720px; margin:0 auto; padding:2.5rem 1.25rem 3rem; }
+    h1 { font-size:1.6rem; margin:0 0 .5rem; }
+    h2 { font-size:1.05rem; color:var(--accent); margin:1.75rem 0 .6rem; }
+    p, li { color:var(--muted); line-height:1.45; }
+    .warn { background:#fef2f2; border:1px solid #fecaca; color:#991b1b; padding:.75rem 1rem; border-radius:8px; }
+    .ok { background:#ecfdf5; border:1px solid #a7f3d0; color:#065f46; padding:.75rem 1rem; border-radius:8px; }
+    code, pre { font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:.82rem; }
+    pre { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:1rem; overflow:auto; }
+    .key { font-size:1rem; word-break:break-all; background:#fff; border:1px dashed var(--accent); padding:.75rem; border-radius:8px; }
+    form { display:grid; gap:.6rem; max-width:480px; margin-top:.75rem; }
+    input { font:inherit; padding:.55rem .65rem; border:1px solid var(--line); border-radius:6px; }
+    button { font:inherit; font-weight:600; background:var(--accent); color:#fff; border:0; border-radius:6px; padding:.55rem .9rem; width:fit-content; cursor:pointer; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Your TokenGuard key</h1>
+
+  {{ if .SlackSaved }}
+  <p class="ok">Slack webhook saved for your org.</p>
+  {{ end }}
+
+  {{ if .Expired }}
+  <p class="warn">This key was already revealed or the setup link expired. Contact support if you need a new key (operator can mint via admin API).</p>
+  {{ else if .Revealed }}
+  <p>Copy this key now — it will not be shown again.</p>
+  <p class="key"><code>{{ .Key }}</code></p>
+  <p>Proxy base URL: <code>{{ .PublicBase }}</code></p>
+  <p>Default budget bucket: <code>default</code> (header optional).</p>
+
+  <h2>curl</h2>
+  <pre>curl {{ .PublicBase }}/v1/chat/completions \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -H "X-TokenGuard-Key: {{ .Key }}" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-4o-mini","max_tokens":50,"messages":[{"role":"user","content":"hi"}]}'</pre>
+
+  <h2>Python</h2>
+  <pre>import os
+from openai import OpenAI
+
+client = OpenAI(
+    api_key=os.environ["OPENAI_API_KEY"],
+    base_url="{{ .PublicBase }}/v1",
+    default_headers={"X-TokenGuard-Key": "{{ .Key }}"},
+)
+print(client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role":"user","content":"hi"}],
+    max_tokens=50,
+))</pre>
+
+  <h2>Optional: Slack alerts</h2>
+  <form method="POST" action="/setup/slack">
+    <input type="hidden" name="session_id" value="{{ .SessionID }}">
+    <input type="url" name="slack_webhook_url" placeholder="https://hooks.slack.com/services/..." required>
+    <button type="submit">Save Slack webhook</button>
+  </form>
+  {{ else }}
+  <p class="warn">Missing session. Complete Checkout from <a href="/signup">/signup</a>.</p>
+  {{ end }}
+</main>
+</body>
+</html>

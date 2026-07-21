@@ -278,3 +278,14 @@ Run `go test ./...` after each phase. Do NOT combine phases.
 ### Out of scope (Post-v1)
 
 Gemini, OpenAI-compatible picker UI, self-serve signup polish, React dashboard, Slack buttons, email, SSO.
+
+---
+
+## S1 Self-Serve Onboarding (branch self-serve)
+
+- Implement entire S1 in one changeset per PLAN.md **S1 — Self-Serve Onboarding**.
+- Public `/signup`, `/signup/checkout`, `/setup` — no ADMIN_API_KEY.
+- Webhook provisions org + tg_ key + default bucket + Redis seed + one-time setup secret.
+- Wire default bucket when X-Budget-Bucket-Id missing.
+- No React. No email sending. No Gemini.
+- TDD; all existing tests must pass; go test ./... green at end.

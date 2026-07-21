@@ -11,6 +11,7 @@ import (
 	"github.com/saksham/token-guard-ai/internal/config"
 	"github.com/saksham/token-guard-ai/internal/ops"
 	"github.com/saksham/token-guard-ai/internal/proxy"
+	"github.com/saksham/token-guard-ai/internal/signup"
 	"github.com/saksham/token-guard-ai/internal/store"
 	"github.com/saksham/token-guard-ai/internal/usage"
 )
@@ -40,6 +41,8 @@ func main() {
 	var usageLogger store.UsageLogger
 	var orgStore store.OrgStore
 	var billingSvc *billing.Service
+	var redisClient *budget.Client
+	var redisStore *admin.RedisStore
 	requireAuth := false
 
 	if cfg.DatabaseURL != "" {
@@ -61,41 +64,17 @@ func main() {
 		logger.Info("usage store connected", "backend", "memory", "multi_tenant", false)
 	}
 
-	billingCfg := billing.Config{
-		SecretKey:     cfg.StripeSecretKey,
-		WebhookSecret: cfg.StripeWebhookSecret,
-		PriceIndie:    cfg.StripePriceIndie,
-		PriceTeam:     cfg.StripePriceTeam,
-		SuccessURL:    cfg.StripeSuccessURL,
-		CancelURL:     cfg.StripeCancelURL,
-	}
-	if billingCfg.Enabled() && orgStore != nil {
-		billingSvc = billing.NewService(billingCfg, billing.NewLiveStripeAPI(billingCfg.SecretKey), orgStore)
-		logger.Info("stripe billing enabled")
-	} else if cfg.StripeSecretKey != "" || cfg.StripeWebhookSecret != "" {
-		logger.Warn("stripe env partially set; billing disabled until secret, webhook secret, and both price IDs are set with an org store")
-	}
-
-	needRedis := cfg.EnforcementMode != config.EnforcementOff || cfg.AdminAPIKey != "" || requireAuth
+	needRedis := cfg.EnforcementMode != config.EnforcementOff || cfg.AdminAPIKey != "" || requireAuth || cfg.StripeSecretKey != ""
 	if needRedis {
-		redisClient, err := budget.NewClient(cfg)
+		var err error
+		redisClient, err = budget.NewClient(cfg)
 		if err != nil {
 			logger.Error("failed to connect to redis", "error", err)
 			os.Exit(1)
 		}
 		defer redisClient.Close()
-
 		alerter = alerter.WithDedupe(redisClient.WarningDedupe())
-
-		redisStore := admin.NewRedisStore(redisClient)
-		if cfg.AdminAPIKey != "" {
-			var checkout admin.CheckoutStarter
-			if billingSvc != nil {
-				checkout = billingSvc
-			}
-			adminHandler = admin.NewHandlerWithBilling(redisStore, usageStore, orgStore, checkout, cfg.AdminAPIKey)
-			opsHandler = ops.NewHandler(cfg.AdminAPIKey, redisStore, usageStore)
-		}
+		redisStore = admin.NewRedisStore(redisClient)
 
 		if cfg.EnforcementMode != config.EnforcementOff {
 			budgetChecker := budget.NewRedisBudgetChecker(redisClient, metrics)
@@ -108,6 +87,35 @@ func main() {
 			streamExt = providers.Stream
 			readiness = budget.NewReadiness(redisClient)
 		}
+	}
+
+	billingCfg := billing.Config{
+		SecretKey:     cfg.StripeSecretKey,
+		WebhookSecret: cfg.StripeWebhookSecret,
+		PriceIndie:    cfg.StripePriceIndie,
+		PriceTeam:     cfg.StripePriceTeam,
+		SuccessURL:    cfg.StripeSuccessURL,
+		CancelURL:     cfg.StripeCancelURL,
+	}
+	if billingCfg.Enabled() && orgStore != nil {
+		billingSvc = billing.NewService(billingCfg, billing.NewLiveStripeAPI(billingCfg.SecretKey), orgStore)
+		if redisClient != nil {
+			billingSvc = billingSvc.WithProvisioner(
+				billing.NewProvisioner(orgStore, redisClient, redisClient, cfg.TrialBudgetTokens),
+			)
+		}
+		logger.Info("stripe billing enabled")
+	} else if cfg.StripeSecretKey != "" || cfg.StripeWebhookSecret != "" {
+		logger.Warn("stripe env partially set; billing disabled until secret, webhook secret, and both price IDs are set with an org store")
+	}
+
+	if cfg.AdminAPIKey != "" && redisStore != nil {
+		var checkout admin.CheckoutStarter
+		if billingSvc != nil {
+			checkout = billingSvc
+		}
+		adminHandler = admin.NewHandlerWithBilling(redisStore, usageStore, orgStore, checkout, cfg.AdminAPIKey)
+		opsHandler = ops.NewHandler(cfg.AdminAPIKey, redisStore, usageStore)
 	}
 
 	transport := proxy.NewTransport(cfg)
@@ -139,6 +147,10 @@ func main() {
 	if opsHandler != nil {
 		server.Handle("GET /ops", opsHandler)
 		logger.Info("ops page mounted", "path", "/ops")
+	}
+	if billingSvc != nil && orgStore != nil && redisClient != nil {
+		signup.NewHandler(billingSvc, orgStore, redisClient, cfg.PublicBaseURL).Register(server.Handle)
+		logger.Info("self-serve signup mounted", "paths", []string{"/signup", "/setup"})
 	}
 	if err := server.ListenAndServe(); err != nil {
 		logger.Error("server exited", "error", err)

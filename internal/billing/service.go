@@ -27,7 +27,7 @@ const (
 )
 
 var (
-	ErrInvalidPlan      = errors.New("plan must be indie or team")
+	ErrInvalidPlan      = errors.New("invalid plan")
 	ErrInvalidSignature = errors.New("invalid stripe signature")
 	ErrMissingConfig    = errors.New("stripe billing not configured")
 )
@@ -47,7 +47,8 @@ func (c Config) Enabled() bool {
 
 func (c Config) PriceIDForPlan(plan string) (string, error) {
 	switch plan {
-	case PlanIndie:
+	case PlanIndie, PlanTrial:
+		// Trial Checkout uses Indie price ID with metadata plan=trial (can be $0 / trial period in Stripe).
 		if c.PriceIndie == "" {
 			return "", ErrMissingConfig
 		}
@@ -68,18 +69,20 @@ func ParsePlan(plan string) (string, error) {
 	case PlanIndie, PlanTeam:
 		return p, nil
 	default:
-		return "", ErrInvalidPlan
+		return "", fmt.Errorf("%w: must be indie or team", ErrInvalidPlan)
 	}
 }
 
 // CreateCheckoutParams is passed to the Stripe API adapter.
 type CreateCheckoutParams struct {
-	OrgID      string
-	Plan       string
-	PriceID    string
-	CustomerID string
-	SuccessURL string
-	CancelURL  string
+	OrgID         string
+	Email         string
+	Plan          string
+	PriceID       string
+	CustomerID    string
+	CustomerEmail string
+	SuccessURL    string
+	CancelURL     string
 }
 
 type CheckoutSession struct {
@@ -92,7 +95,7 @@ type StripeAPI interface {
 	CreateCheckoutSession(ctx context.Context, p CreateCheckoutParams) (CheckoutSession, error)
 }
 
-// OrgBilling persists Stripe plan state on orgs.
+// OrgBilling persists Stripe plan state on orgs (admin checkout path).
 type OrgBilling interface {
 	GetOrg(ctx context.Context, orgID string) (store.Org, error)
 	ApplyCheckoutCompleted(ctx context.Context, orgID, plan, customerID, subscriptionID string) error
@@ -100,13 +103,19 @@ type OrgBilling interface {
 }
 
 type Service struct {
-	cfg  Config
-	api  StripeAPI
-	orgs OrgBilling
+	cfg         Config
+	api         StripeAPI
+	orgs        OrgBilling
+	provisioner *Provisioner
 }
 
 func NewService(cfg Config, api StripeAPI, orgs OrgBilling) *Service {
 	return &Service{cfg: cfg, api: api, orgs: orgs}
+}
+
+func (s *Service) WithProvisioner(p *Provisioner) *Service {
+	s.provisioner = p
+	return s
 }
 
 func (s *Service) StartCheckout(ctx context.Context, orgID, plan string) (string, error) {
@@ -145,6 +154,43 @@ func (s *Service) StartCheckout(ctx context.Context, orgID, plan string) (string
 	return session.URL, nil
 }
 
+// StartPublicCheckout creates Checkout for self-serve signup (email + plan metadata).
+func (s *Service) StartPublicCheckout(ctx context.Context, email, plan string) (string, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	if email == "" || !strings.Contains(email, "@") {
+		return "", errors.New("valid email required")
+	}
+	plan, err := ParseSignupPlan(plan)
+	if err != nil {
+		return "", err
+	}
+	priceID, err := s.cfg.PriceIDForPlan(plan)
+	if err != nil {
+		return "", err
+	}
+	if s.cfg.SuccessURL == "" || s.cfg.CancelURL == "" {
+		return "", fmt.Errorf("%w: success/cancel URL required", ErrMissingConfig)
+	}
+	if s.api == nil {
+		return "", ErrMissingConfig
+	}
+	session, err := s.api.CreateCheckoutSession(ctx, CreateCheckoutParams{
+		Email:         email,
+		Plan:          plan,
+		PriceID:       priceID,
+		CustomerEmail: email,
+		SuccessURL:    s.cfg.SuccessURL,
+		CancelURL:     s.cfg.CancelURL,
+	})
+	if err != nil {
+		return "", err
+	}
+	if session.URL == "" {
+		return "", errors.New("stripe checkout session missing url")
+	}
+	return session.URL, nil
+}
+
 type Event struct {
 	ID   string `json:"id"`
 	Type string `json:"type"`
@@ -154,9 +200,14 @@ type Event struct {
 }
 
 type checkoutSessionObject struct {
-	Customer     string            `json:"customer"`
-	Subscription string            `json:"subscription"`
-	Metadata     map[string]string `json:"metadata"`
+	ID               string            `json:"id"`
+	Customer         json.RawMessage   `json:"customer"`
+	Subscription     json.RawMessage   `json:"subscription"`
+	Metadata         map[string]string `json:"metadata"`
+	CustomerDetails  *struct {
+		Email string `json:"email"`
+	} `json:"customer_details"`
+	CustomerEmail string `json:"customer_email"`
 }
 
 type subscriptionObject struct {
@@ -184,15 +235,46 @@ func (s *Service) dispatch(ctx context.Context, ev Event) error {
 		if err := json.Unmarshal(ev.Data.Object, &obj); err != nil {
 			return fmt.Errorf("parse checkout session: %w", err)
 		}
-		orgID := obj.Metadata["org_id"]
-		plan := obj.Metadata["plan"]
-		if orgID == "" || plan == "" {
-			return errors.New("checkout session missing org_id/plan metadata")
+		customerID := extractCustomerID(obj.Customer)
+		subscriptionID := extractSubscriptionID(obj.Subscription)
+		plan := ""
+		orgID := ""
+		if obj.Metadata != nil {
+			plan = obj.Metadata["plan"]
+			orgID = obj.Metadata["org_id"]
 		}
-		if _, err := ParsePlan(plan); err != nil {
-			return err
+
+		// Admin path: org_id in metadata
+		if orgID != "" {
+			if plan == "" {
+				return errors.New("checkout session missing plan metadata")
+			}
+			if _, err := ParsePlan(plan); err != nil {
+				return err
+			}
+			return s.orgs.ApplyCheckoutCompleted(ctx, orgID, plan, customerID, subscriptionID)
 		}
-		return s.orgs.ApplyCheckoutCompleted(ctx, orgID, plan, obj.Customer, obj.Subscription)
+
+		// Self-serve path: email in metadata or customer_details
+		email := ""
+		if obj.Metadata != nil {
+			email = obj.Metadata["email"]
+		}
+		if email == "" && obj.CustomerDetails != nil {
+			email = obj.CustomerDetails.Email
+		}
+		if email == "" {
+			email = obj.CustomerEmail
+		}
+		if email == "" || plan == "" {
+			return errors.New("checkout session missing email/plan for provisioning")
+		}
+		if s.provisioner == nil {
+			return errors.New("signup provisioner not configured")
+		}
+		_, err := s.provisioner.ProvisionSignup(ctx, obj.ID, email, plan, customerID, subscriptionID)
+		return err
+
 	case EventSubscriptionDeleted:
 		var obj subscriptionObject
 		if err := json.Unmarshal(ev.Data.Object, &obj); err != nil {
@@ -203,11 +285,10 @@ func (s *Service) dispatch(ctx context.Context, ev Event) error {
 		}
 		err := s.orgs.DowngradeBySubscription(ctx, obj.ID)
 		if errors.Is(err, store.ErrNotFound) {
-			return nil // already downgraded / unknown sub
+			return nil
 		}
 		return err
 	default:
-		// Ignore unrelated events.
 		return nil
 	}
 }

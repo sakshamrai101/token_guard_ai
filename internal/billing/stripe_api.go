@@ -33,12 +33,20 @@ func (a *LiveStripeAPI) CreateCheckoutSession(ctx context.Context, p CreateCheck
 	form.Set("cancel_url", p.CancelURL)
 	form.Set("line_items[0][price]", p.PriceID)
 	form.Set("line_items[0][quantity]", "1")
-	form.Set("metadata[org_id]", p.OrgID)
 	form.Set("metadata[plan]", p.Plan)
-	form.Set("subscription_data[metadata][org_id]", p.OrgID)
 	form.Set("subscription_data[metadata][plan]", p.Plan)
+	if p.OrgID != "" {
+		form.Set("metadata[org_id]", p.OrgID)
+		form.Set("subscription_data[metadata][org_id]", p.OrgID)
+	}
+	if p.Email != "" {
+		form.Set("metadata[email]", p.Email)
+		form.Set("subscription_data[metadata][email]", p.Email)
+	}
 	if p.CustomerID != "" {
 		form.Set("customer", p.CustomerID)
+	} else if p.CustomerEmail != "" {
+		form.Set("customer_email", p.CustomerEmail)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.baseURL+"/v1/checkout/sessions", strings.NewReader(form.Encode()))

@@ -435,21 +435,82 @@ Do NOT combine phases. TDD each phase. `go test ./...` must stay green. Update [
 
 ### Post–Hosted-v1 (build on demand)
 
-Overview of what comes **after** H6 and proven interest — **not in H3–H6 builder scope**. Capture in ARCHITECTURE.md when each is designed.
+| Priority | Feature | Notes |
+|----------|---------|-------|
+| **S1 (NOW)** | Self-serve signup → Stripe → setup page with one-time key | See section below — **current branch `self-serve`** |
+| **P1** | Gemini native JSON + SSE extractors | After S1 |
+| **P1** | OpenAI-compatible upstream picker (Grok / custom base URL) | After S1 |
+| **P2** | Real dashboard (React) | On demand |
+| **P2** | Slack interactive top-up / email alerts | On demand |
+| **P3** | SSO, Prometheus, community self-hosted docs | Later |
 
-| Priority | Feature | Why later |
-|----------|---------|-----------|
-| **P1** | Gemini native JSON + SSE extractors | Users ask for Google models |
-| **P1** | OpenAI-compatible upstream picker (Grok / custom base URL) in org settings | Model-agnostic without N parsers |
-| **P1** | Self-serve signup page (email → Stripe → key shown once) | Reduce manual onboarding |
-| **P2** | Real dashboard (React): charts, bucket CRUD, invite members | Demand for UI beyond `/ops` |
-| **P2** | Slack interactive top-up buttons | Nice-to-have after webhook works |
-| **P2** | Email alerts (Resend/Postmark) | Users without Slack |
-| **P2** | CSV export + longer retention / audit export | Team plan upsell |
-| **P3** | Hold provider keys in vault (optional) | Higher trust / complexity |
-| **P3** | SSO / multi-seat Team | Enterprise-ish |
-| **P3** | Prometheus `/metrics` + status page | Ops maturity |
-| **P3** | Community self-hosted free tier (docs only) | Lead gen; paid = hosted |
+---
+
+## S1 — Self-Serve Onboarding (FINISHED PRODUCT FEEL)
+
+**Branch:** `self-serve`  
+**Goal:** Customer never needs the operator after landing page. Signup → pay (or trial Checkout) → see `tg_` key once → copy SDK snippet → call proxy. Feels like a finished product.
+
+**Quality bar:** Landing “Get started” completes without admin curl. Operator `/ops` remains for support only.
+
+### Locked decisions
+
+| Item | Choice |
+|------|--------|
+| Entry | Public `POST /signup/checkout` (email + plan) and/or simple `GET /signup` HTML form |
+| Payment | Existing Stripe Checkout (Indie/Team); trial can use Checkout with trial period **or** free path that still creates org+key with seeded budget (document which — prefer Stripe Checkout with `trial` plan metadata for one code path) |
+| After payment | Webhook creates org (from email), mints `tg_` key, upserts bucket `default`, seeds Redis balance, stores one-time key blob |
+| Key reveal | `GET /setup?session_id=cs_...` HTML — shows key **once**, then deletes one-time secret |
+| Default bucket | Wire `default_bucket_id=default`; if `X-Budget-Bucket-Id` missing, use `default` |
+| Trial seed | Env `TRIAL_BUDGET_TOKENS` (default 200000) |
+| Slack | Optional field on `/setup` page → PATCH org webhook |
+| Auth header | Still `X-TokenGuard-Key` |
+
+### Deliverables (single changeset — do it all)
+
+1. **Public signup**
+   - `GET /signup` — minimal HTML: email, plan select (trial/indie/team), submit
+   - `POST /signup/checkout` — JSON `{email, plan}` → Stripe Checkout Session URL (metadata: email, plan); no `ADMIN_API_KEY`
+2. **Webhook enrichment** (`checkout.session.completed`)
+   - If org for email missing → create org (name=email or derived)
+   - Mint API key; persist hash
+   - Upsert `buckets (org_id, default)` and set `orgs.default_bucket_id = default`
+   - Seed Redis `budget:{org_id}:default` = `TRIAL_BUDGET_TOKENS` (or plan-based seed)
+   - Store one-time plaintext key in Redis `setup:session:{checkout_session_id}` TTL 15m (or Postgres table)
+   - Set Stripe IDs + plan as today
+3. **Setup page**
+   - `GET /setup?session_id=` — HTML: shows `tg_` key once, proxy base URL, copy-paste Python + curl snippets using `default` bucket
+   - Optional Slack webhook input → save on org
+   - Second visit / expired → “key already revealed or expired — contact support” (no re-show plaintext)
+4. **Default bucket in proxy**
+   - Empty `X-Budget-Bucket-Id` → use org `default_bucket_id` or `"default"` (do **not** fail-open for missing bucket when default exists)
+5. **Config / compose**
+   - `TRIAL_BUDGET_TOKENS`, `PUBLIC_BASE_URL` (for snippets and Stripe success URL → `/setup?session_id={CHECKOUT_SESSION_ID}`)
+   - Stripe success URL must include `{CHECKOUT_SESSION_ID}` template
+6. **Docs**
+   - README + ONBOARDING + RUNBOOK: self-serve path is primary; admin mint is fallback for support
+
+### Explicitly OUT of S1
+
+- React dashboard, magic-link login later, email sending key (page reveal only), Gemini, team invites, hard plan quota enforcement
+
+### S1 Definition of Done
+
+- [x] Unauthenticated user can start Checkout from `/signup`
+- [x] After test payment / webhook: org + key + `default` bucket + Redis seed exist
+- [x] `/setup?session_id=` shows key once; second load does not
+- [x] LLM call with only `X-TokenGuard-Key` (no bucket header) uses `default` bucket and settles
+- [x] Slack optional save from setup page works
+- [x] Existing H1–H6 tests still pass; new tests for signup/webhook/setup/default-bucket
+- [x] `go test ./...` green
+
+### Tests (required)
+
+- Signup checkout returns URL (mocked Stripe)
+- Webhook creates org+key+seed (miniredis + store)
+- Setup reveals once then empties
+- Proxy default bucket when header absent
+- Invalid/expired session_id → clear error page/JSON
 
 ---
 
@@ -468,6 +529,8 @@ Overview of what comes **after** H6 and proven interest — **not in H3–H6 bui
 | Hosted v1 storage | Redis (budgets) + Postgres (orgs, keys, usage, Stripe) | No React dashboard |
 | Hosted v1 UX | Ops HTML page + dump APIs + Slack | Dashboard post-v1 on demand |
 | Provider keys | Customer passthrough | TokenGuard does not store provider secrets |
+| **S1 onboarding** | **Self-serve Checkout → `/setup` one-time key** | Operator mint is support fallback only |
+| **S1 default bucket** | **`default` auto-seeded; header optional** | Missing header uses org default — not fail-open |
 
 ---
 

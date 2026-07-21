@@ -55,4 +55,22 @@ func (s *MemoryUsageStore) ListUsage(_ context.Context, bucketID string, limit i
 	return out, nil
 }
 
+func (s *MemoryUsageStore) ListUsageByOrg(_ context.Context, orgID string, limit int) ([]UsageEvent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if limit <= 0 {
+		limit = 50
+	}
+	var out []UsageEvent
+	for i := len(s.events) - 1; i >= 0 && len(out) < limit; i-- {
+		e := s.events[i]
+		if e.OrgID != orgID {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out, nil
+}
+
 func (s *MemoryUsageStore) Close() error { return nil }

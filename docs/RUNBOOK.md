@@ -39,7 +39,7 @@ Tear down: `docker compose down` (add `-v` to wipe the Postgres volume).
 4. Open firewall for `8080` (or terminate TLS on nginx/Caddy → `127.0.0.1:8080`).
 5. `docker compose up -d --build`
 6. Point Stripe webhook to `https://your.domain/billing/webhook` (or use Stripe CLI while testing).
-7. Confirm `/signup`, `/ops`, and `/readyz`. Smoke a Checkout → `/setup` reveal → LLM call.
+7. Confirm `/signup`, `/account`, `/ops`, and `/readyz`. Smoke a Checkout → `/setup` reveal → LLM call → `/me/buckets`.
 
 Do **not** expose Redis or Postgres publicly.
 
@@ -234,6 +234,24 @@ Per-org webhook preferred; else global `SLACK_WEBHOOK_URL`.
 
 ---
 
+## Customer analytics vs operator ops
+
+| Who | Surface | Auth |
+|-----|---------|------|
+| Customer | `/me/*`, `/account` | `X-TokenGuard-Key` — org-scoped balances/usage + Slack update |
+| Operator | `/ops`, `/admin/*` | `ADMIN_API_KEY` — cross-tenant support |
+
+Point customers at `/account` (or `GET /me/buckets`) for “what’s my balance?” — **never** share operator Basic auth.
+
+```bash
+curl -s http://localhost:8080/me/buckets -H "X-TokenGuard-Key: $TG_KEY"
+curl -s "http://localhost:8080/me/usage?limit=50" -H "X-TokenGuard-Key: $TG_KEY"
+```
+
+**Out of A1:** multi-provider OpenAI+Anthropic routing (separate later branch), React dashboard, customer topup.
+
+---
+
 ## Security Checklist
 
 - [ ] `ADMIN_API_KEY` set and not committed
@@ -243,3 +261,4 @@ Per-org webhook preferred; else global `SLACK_WEBHOOK_URL`.
 - [ ] `PUBLIC_BASE_URL` + Stripe success URL include `{CHECKOUT_SESSION_ID}` for `/setup`
 - [ ] Bucket header optional after signup (`default`); prefer gateway injection for multi-bucket apps
 - [ ] Provider secrets never logged
+- [ ] Never give customers `ADMIN_API_KEY`; they use `/account` + `/me`

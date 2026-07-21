@@ -772,11 +772,13 @@ See PLAN.md Hosted Product v1 Definition of Done (H1–H6 **shipped**).
 
 | Gap | Status |
 |-----|--------|
-| Self-serve signup | **S1 — current branch `self-serve`** (§15) |
-| `default_bucket_id` unused | **S1 — wire** |
-| Plan quotas hard-enforced | Post-S1 |
-| Key revoke admin API | Post-S1 |
-| One UPSTREAM_URL per process | By design |
+| Self-serve signup | **S1 — done** (§15) |
+| `default_bucket_id` unused | **S1 — done** |
+| Customer self-serve balance/usage UI | **A1 — done** (§16) |
+| Plan quotas hard-enforced | Post-A1 |
+| Key revoke / remint for customer | Post-A1 |
+| One UPSTREAM_URL per process | By design until multi-provider branch |
+| One-app OpenAI + Anthropic on one hostname | **Later — separate branch** (not A1) |
 
 ---
 
@@ -809,3 +811,65 @@ See PLAN.md Hosted Product v1 Definition of Done (H1–H6 **shipped**).
 - Package: `internal/signup` (handlers + templates); extend `internal/billing` webhook provisioning; extend proxy for default bucket.
 - Do not re-show plaintext key after first `/setup` load.
 - Admin org/key mint remains for operator support only.
+
+---
+
+## 16. A1 Customer Analytics Architecture
+
+**Branch:** `analytics` (**done**). Spec: PLAN.md **A1**.
+
+### 16.1 Problem
+
+Slack alerts tell the customer something is wrong. They cannot answer “what is my balance?” or “what settled recently?” without the operator’s `/ops` (ADMIN_API_KEY). That creates support load and weakens the $15/mo product.
+
+### 16.2 Separation of surfaces
+
+| Surface | Auth | Audience | Role |
+|---------|------|----------|------|
+| Slack webhook | Org-configured URL | Customer channel | Push: exhaust / 80% / fail-open |
+| `/me/*` + `/account` | `X-TokenGuard-Key` | Customer | Pull: balances, usage, Slack update |
+| `/ops` + `/admin/*` | `ADMIN_API_KEY` | Operator | Cross-tenant support |
+
+### 16.3 Request flow
+
+```text
+Customer → GET /me/buckets
+         Header: X-TokenGuard-Key: tg_...
+         → LookupAPIKey → org_id
+         → List Redis budget:{org_id}:* (or registry buckets + GET balance)
+         → JSON {buckets:[...]}  // org-scoped only
+
+Customer → GET /account (HTML)
+         → Paste/submit tg_ key for this view (no long-lived server session of raw key in A1)
+         → Same org-scoped queries → render tables
+```
+
+### 16.4 Routes
+
+| Method | Path | Auth | Response |
+|--------|------|------|----------|
+| GET | `/me/buckets` | `X-TokenGuard-Key` | JSON balances for org |
+| GET | `/me/usage` | `X-TokenGuard-Key` | JSON usage_events for org |
+| GET | `/me/org` | `X-TokenGuard-Key` | JSON plan / default_bucket (mask secrets) |
+| PATCH | `/me/slack` | `X-TokenGuard-Key` | Update org slack_webhook_url |
+| GET/POST | `/account` (+ view) | tg_ key via header or one-shot form | HTML |
+
+### 16.5 Data rules (non-negotiable)
+
+- Every query must include `org_id` from key lookup.
+- Integration test: org A key must not observe org B rows/balances.
+- Reuse existing Redis balance reads and Postgres `usage_events` — no new analytics warehouse.
+- Do not expose other orgs, admin dumps, or raw provider API keys.
+
+### 16.6 Explicitly not A1
+
+- React dashboard
+- Multi-provider path routing (OpenAI + Anthropic dual upstream on one process) — **later branch**
+- Customer topup / key remint UI
+- Charts, CSV, Stripe portal
+
+### 16.7 Package sketch
+
+- `internal/account` — handlers, templates, org-scoped queries
+- Reuse `store.OrgStore` / usage list + `budget` balance helpers
+- Mount from `cmd/proxy/main.go` when multi-tenant (Postgres) enabled

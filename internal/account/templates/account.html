@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TokenGuard Account</title>
+  <style>
+    :root {
+      --bg: #f6f4ef;
+      --ink: #1c1917;
+      --muted: #57534e;
+      --line: #d6d3d1;
+      --card: #ffffff;
+      --accent: #0f766e;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+      background: linear-gradient(180deg, #ece7dc 0%, var(--bg) 40%);
+      color: var(--ink);
+      line-height: 1.45;
+    }
+    main { max-width: 960px; margin: 0 auto; padding: 2rem 1.25rem 3rem; }
+    h1 { font-size: 1.75rem; margin: 0 0 0.25rem; letter-spacing: -0.02em; }
+    h2 { font-size: 1.1rem; margin: 2rem 0 0.75rem; color: var(--accent); }
+    .meta { color: var(--muted); font-size: 0.9rem; margin-bottom: 1.5rem; }
+    .error {
+      background: #fef2f2; color: #991b1b; border: 1px solid #fecaca;
+      padding: 0.75rem 1rem; border-radius: 6px; margin-bottom: 1rem;
+    }
+    .ok {
+      background: #ecfdf5; color: #065f46; border: 1px solid #a7f3d0;
+      padding: 0.75rem 1rem; border-radius: 6px; margin-bottom: 1rem;
+    }
+    .card {
+      background: var(--card); border: 1px solid var(--line); border-radius: 8px;
+      padding: 1rem 1.1rem; margin-bottom: 1rem;
+    }
+    label { display: block; font-size: 0.85rem; color: var(--muted); margin-bottom: 0.35rem; }
+    input[type="text"], input[type="password"], input[type="url"] {
+      width: 100%; max-width: 520px; padding: 0.55rem 0.7rem; border: 1px solid var(--line);
+      border-radius: 6px; font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 0.9rem;
+    }
+    button {
+      margin-top: 0.75rem; background: var(--accent); color: #fff; border: none;
+      border-radius: 6px; padding: 0.55rem 1rem; font-size: 0.95rem; cursor: pointer;
+    }
+    button:hover { filter: brightness(0.95); }
+    table {
+      width: 100%; border-collapse: collapse; background: var(--card);
+      border: 1px solid var(--line); border-radius: 8px; overflow: hidden;
+      font-size: 0.92rem;
+    }
+    th, td { text-align: left; padding: 0.55rem 0.75rem; border-bottom: 1px solid var(--line); }
+    th { background: #fafaf9; font-weight: 600; color: var(--muted); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.04em; }
+    tr:last-child td { border-bottom: none; }
+    td.num { font-variant-numeric: tabular-nums; font-family: "IBM Plex Mono", ui-monospace, monospace; }
+    .empty { color: var(--muted); font-style: italic; padding: 0.75rem 0; }
+    .kv { margin: 0.25rem 0; }
+    .kv span { color: var(--muted); }
+  </style>
+</head>
+<body>
+<main>
+  <h1>TokenGuard Account</h1>
+  <p class="meta">Paste your <code>tg_</code> key once to view org balances and recent usage. The key is not stored as a session.</p>
+
+  {{ if .Error }}<div class="error">{{ .Error }}</div>{{ end }}
+  {{ if .SlackOK }}<div class="ok">Slack webhook saved.</div>{{ end }}
+
+  <div class="card">
+    <form method="post" action="/account/view">
+      <label for="tg_key">TokenGuard key</label>
+      <input id="tg_key" name="tg_key" type="password" autocomplete="off" required
+             placeholder="tg_…" value="{{ .KeySubmitted }}">
+      <button type="submit">View account</button>
+    </form>
+  </div>
+
+  {{ if .Org }}
+  <h2>Organization</h2>
+  <div class="card">
+    <p class="kv"><span>Org:</span> {{ .Org.OrgID }}</p>
+    <p class="kv"><span>Plan:</span> {{ .Org.Plan }}</p>
+    <p class="kv"><span>Default bucket:</span> {{ .Org.DefaultBucketID }}</p>
+    <p class="kv"><span>Slack:</span>
+      {{ if .Org.SlackWebhookSet }}set ({{ .Org.SlackWebhookMask }}){{ else }}not set{{ end }}
+    </p>
+  </div>
+
+  <h2>Bucket balances</h2>
+  {{ if .Buckets }}
+  <table>
+    <thead><tr><th>Bucket</th><th>Balance</th></tr></thead>
+    <tbody>
+      {{ range .Buckets }}
+      <tr><td>{{ .BucketID }}</td><td class="num">{{ .Balance }}</td></tr>
+      {{ end }}
+    </tbody>
+  </table>
+  {{ else }}
+  <p class="empty">No budget buckets found for this org.</p>
+  {{ end }}
+
+  <h2>Recent usage (last 50)</h2>
+  {{ if .Events }}
+  <table>
+    <thead>
+      <tr>
+        <th>Time</th><th>Bucket</th><th>Request</th>
+        <th>Reserved</th><th>Actual</th><th>Outcome</th><th>Provider</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{ range .Events }}
+      <tr>
+        <td>{{ .CreatedAt.Format "2006-01-02 15:04:05" }}</td>
+        <td>{{ .BucketID }}</td>
+        <td>{{ .RequestID }}</td>
+        <td class="num">{{ .Reserved }}</td>
+        <td class="num">{{ .Actual }}</td>
+        <td>{{ .Outcome }}</td>
+        <td>{{ .Provider }}</td>
+      </tr>
+      {{ end }}
+    </tbody>
+  </table>
+  {{ else }}
+  <p class="empty">No usage events yet.</p>
+  {{ end }}
+
+  <h2>Slack webhook</h2>
+  <div class="card">
+    <form method="post" action="/account/slack">
+      <input type="hidden" name="tg_key" value="{{ .KeySubmitted }}">
+      <label for="slack_webhook_url">Incoming webhook URL</label>
+      <input id="slack_webhook_url" name="slack_webhook_url" type="url"
+             placeholder="https://hooks.slack.com/services/…" required>
+      <button type="submit">Save Slack webhook</button>
+    </form>
+  </div>
+  {{ end }}
+
+  <p class="meta" style="margin-top:2rem">
+    API: <code>GET /me/buckets</code>, <code>GET /me/usage</code>, <code>GET /me/org</code>, <code>PATCH /me/slack</code>
+    with header <code>X-TokenGuard-Key</code>.
+  </p>
+</main>
+</body>
+</html>

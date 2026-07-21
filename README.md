@@ -13,13 +13,15 @@ Built for indie devs and small AI startups who want set-and-forget abuse protect
 - **Fail-open** when Redis is unreachable — LLM traffic still flows
 - **Release** (full refund) on upstream 4xx/5xx
 - **Admin API** for buckets, orgs, keys, usage dumps
-- **Hosted mode:** `X-TokenGuard-Key`, org-scoped Redis budgets, Stripe plans, Slack alerts, `/ops`
+- **Hosted mode:** `X-TokenGuard-Key`, org-scoped Redis budgets, Stripe plans, Slack alerts, `/account` + `/me`, `/ops`
 
 Provider routing is by `UPSTREAM_HOST`: `api.openai.com` → OpenAI extractors; `api.anthropic.com` → Anthropic extractors. Run one proxy instance per provider.
 
 See [PLAN.md](PLAN.md), [ARCHITECTURE.md](ARCHITECTURE.md), [ONBOARDING.md](ONBOARDING.md), and [docs/RUNBOOK.md](docs/RUNBOOK.md).
 
 **Self-serve (S1):** Customers use `/signup` → Stripe Checkout → `/setup?session_id=` (one-time `tg_` key). Admin mint is support fallback only.
+
+**Customer analytics (A1):** Org-scoped `GET /me/buckets`, `GET /me/usage`, `GET /me/org`, `PATCH /me/slack`, and minimal `/account` HTML (auth: `X-TokenGuard-Key`). Slack stays for alerts; customers should not need operator `/ops`.
 
 ## Docker quick start (proxy + Redis + Postgres)
 
@@ -59,7 +61,9 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 
 `X-Budget-Bucket-Id` is optional — seeded bucket `default` is used when omitted.
 
-**Ops UI:** [http://localhost:8080/ops](http://localhost:8080/ops) — Basic auth user `admin`, password = `ADMIN_API_KEY`.
+**Account UI:** [http://localhost:8080/account](http://localhost:8080/account) — paste your `tg_` key to view balances + usage (or call `GET /me/buckets` with `X-TokenGuard-Key`).
+
+**Ops UI:** [http://localhost:8080/ops](http://localhost:8080/ops) — Basic auth user `admin`, password = `ADMIN_API_KEY` (operator only).
 
 Admin mint (org/key/budget) remains for support only — see [docs/RUNBOOK.md](docs/RUNBOOK.md).
 
@@ -175,6 +179,8 @@ See [.env.example](.env.example) for all variables. Key settings:
 
 - `GET /healthz` — liveness (always 200)
 - `GET /readyz` — returns 503 when Redis is unreachable (orchestration signal; proxy still serves traffic fail-open)
+- `GET /account` — customer HTML (paste `tg_` key; one-shot view)
+- `GET /me/buckets`, `/me/usage`, `/me/org` — customer JSON (`X-TokenGuard-Key`)
 - `GET /ops` — operator HTML (Basic auth)
 
 ## Development
@@ -189,6 +195,7 @@ go build -o bin/proxy ./cmd/proxy/
 ```
 cmd/proxy/          Entry point
 internal/
+  account/          Customer /me APIs + /account HTML
   admin/            Admin API
   billing/          Stripe Checkout + webhook + provisioning
   budget/           Redis client, Lua scripts, alerts

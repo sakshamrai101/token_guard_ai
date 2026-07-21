@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 
+	"github.com/saksham/token-guard-ai/internal/account"
 	"github.com/saksham/token-guard-ai/internal/admin"
 	"github.com/saksham/token-guard-ai/internal/billing"
 	"github.com/saksham/token-guard-ai/internal/budget"
@@ -147,6 +148,10 @@ func main() {
 	if opsHandler != nil {
 		server.Handle("GET /ops", opsHandler)
 		logger.Info("ops page mounted", "path", "/ops")
+	}
+	if orgStore != nil && redisClient != nil {
+		account.NewHandler(orgStore, redisClient, usageStore).Register(server.Handle)
+		logger.Info("customer account mounted", "paths", []string{"/me", "/account"})
 	}
 	if billingSvc != nil && orgStore != nil && redisClient != nil {
 		signup.NewHandler(billingSvc, orgStore, redisClient, cfg.PublicBaseURL).Register(server.Handle)

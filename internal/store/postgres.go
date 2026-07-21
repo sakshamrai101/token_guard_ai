@@ -118,7 +118,28 @@ LIMIT $2
 		return nil, fmt.Errorf("list usage_events: %w", err)
 	}
 	defer rows.Close()
+	return scanUsageRows(rows)
+}
 
+func (s *PostgresUsageStore) ListUsageByOrg(ctx context.Context, orgID string, limit int) ([]UsageEvent, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, org_id, bucket_id, request_id, reserved, actual, outcome, provider, created_at
+FROM usage_events
+WHERE org_id = $1
+ORDER BY created_at DESC, id DESC
+LIMIT $2
+`, orgID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list usage_events by org: %w", err)
+	}
+	defer rows.Close()
+	return scanUsageRows(rows)
+}
+
+func scanUsageRows(rows *sql.Rows) ([]UsageEvent, error) {
 	var out []UsageEvent
 	for rows.Next() {
 		var e UsageEvent

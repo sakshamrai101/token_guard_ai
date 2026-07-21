@@ -24,6 +24,7 @@ type UsageEvent struct {
 type UsageStore interface {
 	InsertUsage(ctx context.Context, e UsageEvent) error
 	ListUsage(ctx context.Context, bucketID string, limit int) ([]UsageEvent, error)
+	ListUsageByOrg(ctx context.Context, orgID string, limit int) ([]UsageEvent, error)
 	Close() error
 }
 

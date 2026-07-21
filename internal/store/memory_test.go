@@ -66,3 +66,35 @@ func TestMemoryUsageStoreRespectsLimit(t *testing.T) {
 		t.Fatalf("len = %d, want 2", len(got))
 	}
 }
+
+func TestMemoryListUsageByOrgScopesAndOrders(t *testing.T) {
+	s := NewMemoryUsageStore()
+	ctx := context.Background()
+	_ = s.InsertUsage(ctx, UsageEvent{OrgID: "orgA", BucketID: "b1", RequestID: "a1", Outcome: "settled"})
+	_ = s.InsertUsage(ctx, UsageEvent{OrgID: "orgB", BucketID: "b1", RequestID: "b1", Outcome: "settled"})
+	_ = s.InsertUsage(ctx, UsageEvent{OrgID: "orgA", BucketID: "b2", RequestID: "a2", Outcome: "settled"})
+
+	got, err := s.ListUsageByOrg(ctx, "orgA", 50)
+	if err != nil {
+		t.Fatalf("ListUsageByOrg: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len = %d, want 2", len(got))
+	}
+	if got[0].RequestID != "a2" || got[1].RequestID != "a1" {
+		t.Fatalf("order = %+v, want a2 then a1", got)
+	}
+	for _, e := range got {
+		if e.OrgID != "orgA" {
+			t.Fatalf("leaked org %q", e.OrgID)
+		}
+	}
+
+	limited, err := s.ListUsageByOrg(ctx, "orgA", 1)
+	if err != nil {
+		t.Fatalf("limit: %v", err)
+	}
+	if len(limited) != 1 || limited[0].RequestID != "a2" {
+		t.Fatalf("limit = %+v", limited)
+	}
+}

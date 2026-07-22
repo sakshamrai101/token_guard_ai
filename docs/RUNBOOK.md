@@ -33,7 +33,8 @@ Tear down: `docker compose down` (add `-v` to wipe the Postgres volume).
    - `ADMIN_API_KEY` — long random secret
    - `PUBLIC_BASE_URL` — public browser URL (e.g. `https://proxy.yourdomain`)
    - `ENFORCEMENT_MODE=shadow` (then `enforce` after soak)
-   - `UPSTREAM_URL` / `UPSTREAM_HOST` for your provider
+   - `UPSTREAM_URL` / `UPSTREAM_HOST` for legacy unprefixed paths
+   - Optional: `OPENAI_UPSTREAM_*` / `ANTHROPIC_UPSTREAM_*` (defaults enable `/openai` + `/anthropic`)
    - Stripe (`STRIPE_*`) for self-serve signup; optional `SLACK_WEBHOOK_URL`
    - `TRIAL_BUDGET_TOKENS` (default `200000`) if you want a non-default seed
 4. Open firewall for `8080` (or terminate TLS on nginx/Caddy → `127.0.0.1:8080`).
@@ -248,7 +249,20 @@ curl -s http://localhost:8080/me/buckets -H "X-TokenGuard-Key: $TG_KEY"
 curl -s "http://localhost:8080/me/usage?limit=50" -H "X-TokenGuard-Key: $TG_KEY"
 ```
 
-**Out of A1:** multi-provider OpenAI+Anthropic routing (separate later branch), React dashboard, customer topup.
+**Out of A1:** React dashboard, customer topup.
+
+---
+
+## Multi-provider vs single-upstream
+
+| Mode | How |
+|------|-----|
+| Single provider (legacy) | `UPSTREAM_URL` / `UPSTREAM_HOST`; clients use `/v1/…` |
+| Dual OpenAI + Anthropic | Path prefixes `/openai/…` and `/anthropic/…` on one process; `OPENAI_UPSTREAM_*` + `ANTHROPIC_UPSTREAM_*` (defaults work); same `tg_` key + buckets |
+
+Smoke: one OpenAI + one Anthropic completion through prefixes; confirm `/account` or admin balance dropped by both usage totals.
+
+**Out of M1:** Gemini/Grok, body-based routing.
 
 ---
 

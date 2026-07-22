@@ -77,7 +77,39 @@ Slack is for **alerts** (80% / exhausted / fail-open). Use `/account` or `/me/*`
 | `PATCH /me/slack` | `X-TokenGuard-Key` | Update org Slack webhook |
 | `/account` | tg_ key (one-shot form) | HTML: balances, usage, Slack update |
 
-**Not in A1:** React dashboard, self-serve topup, key remint, multi-provider routing.
+**Not in A1:** React dashboard, self-serve topup, key remint.
+
+---
+
+## Multi-provider apps
+
+If your app uses **both** OpenAI and Anthropic, point each SDK at a path prefix on the **same** Token Guard host:
+
+| Provider | Example `base_url` |
+|----------|----------------------|
+| OpenAI | `{PUBLIC_BASE_URL}/openai/v1` |
+| Anthropic | `{PUBLIC_BASE_URL}/anthropic` |
+
+```python
+from openai import OpenAI
+import anthropic
+import os
+
+headers = {"X-TokenGuard-Key": os.environ["TG_KEY"]}
+
+oai = OpenAI(
+    api_key=os.environ["OPENAI_API_KEY"],
+    base_url=os.environ["PUBLIC_BASE_URL"] + "/openai/v1",
+    default_headers=headers,
+)
+ant = anthropic.Anthropic(
+    api_key=os.environ["ANTHROPIC_API_KEY"],
+    base_url=os.environ["PUBLIC_BASE_URL"] + "/anthropic",
+    default_headers=headers,
+)
+```
+
+Same `X-TokenGuard-Key` and optional `X-Budget-Bucket-Id` for both — one Redis bucket. Single-provider apps can keep using unprefixed `{PUBLIC_BASE_URL}/v1` with `UPSTREAM_*`.
 
 ---
 

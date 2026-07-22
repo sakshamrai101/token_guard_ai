@@ -566,7 +566,8 @@ Client App  →  [Client Gateway]  →  Token Guard Proxy  →  OpenAI / Anthrop
 
 - Token Guard does **not** store provider API keys — they pass through.
 - Token Guard does **not** require a user database for v1 — buckets are string IDs in Redis.
-- One proxy deployment = one `UPSTREAM_URL` (OpenAI **or** Anthropic). Clients run two instances if they need both.
+- **Legacy / single-provider:** one `UPSTREAM_URL` (OpenAI **or** Anthropic).
+- **M1 (branch `multi-routing`):** one process can route **both** via path prefixes `/openai/` and `/anthropic/` (see §17). Same org/buckets.
 
 ### 13.2 Multi-Provider Extractor Routing
 
@@ -775,10 +776,10 @@ See PLAN.md Hosted Product v1 Definition of Done (H1–H6 **shipped**).
 | Self-serve signup | **S1 — done** (§15) |
 | `default_bucket_id` unused | **S1 — done** |
 | Customer self-serve balance/usage UI | **A1 — done** (§16) |
-| Plan quotas hard-enforced | Post-A1 |
-| Key revoke / remint for customer | Post-A1 |
-| One UPSTREAM_URL per process | By design until multi-provider branch |
-| One-app OpenAI + Anthropic on one hostname | **Later — separate branch** (not A1) |
+| Plan quotas hard-enforced | Post-M1 |
+| Key revoke / remint for customer | Post-M1 |
+| One-app OpenAI + Anthropic on one hostname | **M1 — done** (§17) |
+| Gemini / Grok native | Post-M1 |
 
 ---
 
@@ -864,7 +865,7 @@ Customer → GET /account (HTML)
 ### 16.6 Explicitly not A1
 
 - React dashboard
-- Multi-provider path routing (OpenAI + Anthropic dual upstream on one process) — **later branch**
+- Multi-provider path routing — **M1** (§17)
 - Customer topup / key remint UI
 - Charts, CSV, Stripe portal
 
@@ -873,3 +874,76 @@ Customer → GET /account (HTML)
 - `internal/account` — handlers, templates, org-scoped queries
 - Reuse `store.OrgStore` / usage list + `budget` balance helpers
 - Mount from `cmd/proxy/main.go` when multi-tenant (Postgres) enabled
+
+---
+
+## 17. M1 Multi-Provider Routing Architecture
+
+**Branch:** `multi-routing` (**done**). Spec: PLAN.md **M1**.
+
+### 17.1 Problem
+
+Apps that call both OpenAI and Anthropic cannot use one Token Guard URL today: process-global `UPSTREAM_URL` + `RegistryForHost` picks a single extractor pair. Second provider either bypasses budgets or breaks settlement.
+
+### 17.2 Design
+
+```text
+Client OpenAI SDK  base_url = https://tg.example/openai/v1
+Client Anthropic   base_url = https://tg.example/anthropic
+
+        ┌─────────────────────────────────────────────┐
+        │ Token Guard (one process)                    │
+        │  /openai/*   → api.openai.com + OpenAI ext   │
+        │  /anthropic/*→ api.anthropic.com + Anthropic │
+        │  /v1/*       → legacy UPSTREAM_* (compat)    │
+        │  same tg_ key → same org → same Redis buckets│
+        └─────────────────────────────────────────────┘
+```
+
+### 17.3 Path rules
+
+| Incoming path | Upstream | Extractors |
+|---------------|----------|------------|
+| `/openai/` + rest | `OPENAI_UPSTREAM_*`; path = rest | OpenAI JSON + SSE |
+| `/anthropic/` + rest | `ANTHROPIC_UPSTREAM_*`; path = rest | Anthropic JSON + SSE |
+| Other proxied paths (e.g. `/v1/…`) | `UPSTREAM_*` | `RegistryForHost(UPSTREAM_HOST)` |
+
+Strip only the first prefix segment (`openai` or `anthropic`). Preserve query string. Rewrite `Host` to selected upstream host. Strip hop-by-hop / internal headers as today.
+
+### 17.4 Per-request state (required)
+
+Today extractors and upstream are fixed at handler construction. M1 must select **per request**:
+
+1. Parse path → provider enum (`openai` | `anthropic` | `legacy`)
+2. Put `{upstreamURL, upstreamHost, jsonExtractor, streamExtractor}` on context
+3. `Director` reads context for rewrite
+4. `ModifyResponse` / settle wraps use context extractors
+
+Do not run provider prefix logic for mux-owned routes: `/admin`, `/me`, `/account`, `/ops`, `/signup`, `/setup`, `/billing`, `/healthz`, `/readyz`.
+
+### 17.5 Budgets
+
+Unchanged: `budget:{org_id}:{bucket_id}`. OpenAI and Anthropic usage both settle into the same bucket when the client sends the same `X-Budget-Bucket-Id` (or default). No per-provider wallet in M1.
+
+### 17.6 Config
+
+| Env | Default | Role |
+|-----|---------|------|
+| `OPENAI_UPSTREAM_URL` / `OPENAI_UPSTREAM_HOST` | `https://api.openai.com` / `api.openai.com` | Prefixed OpenAI |
+| `ANTHROPIC_UPSTREAM_URL` / `ANTHROPIC_UPSTREAM_HOST` | `https://api.anthropic.com` / `api.anthropic.com` | Prefixed Anthropic |
+| `UPSTREAM_URL` / `UPSTREAM_HOST` | existing | Legacy unprefixed |
+
+Enable `/openai` and `/anthropic` routing when both OpenAI and Anthropic URL pairs are set (defaults count as set). Legacy always available.
+
+### 17.7 Explicitly not M1
+
+- Gemini / Grok
+- Body sniffing / `X-Provider` header routing (path only)
+- Separate budgets per provider
+- Removing single-upstream mode
+
+### 17.8 Package sketch
+
+- Prefer extend `internal/proxy` (director + context) + `internal/config`; reuse `internal/usage` registries
+- Optional tiny `internal/proxy/provider.go` for path detect + strip helpers
+- Integration tests under `test/integration/` with two mock upstreams

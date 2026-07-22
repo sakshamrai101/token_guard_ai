@@ -31,22 +31,23 @@ type BalanceReader interface {
 }
 
 type Handler struct {
-	cfg           config.Config
-	proxy         *httputil.ReverseProxy
-	enforcement   *Enforcement
-	releaser      BudgetReleaser
-	settler       BudgetSettler
-	balances      BalanceReader
-	extractor     usage.UsageExtractor
-	streamExt     usage.StreamExtractor
-	estimateCfg   budget.EstimateConfig
-	metrics       *budget.Metrics
-	alerter       *budget.Alerter
-	usageLogger   store.UsageLogger
-	bucketReg     store.OrgStore
-	upstreamURL   *url.URL
-	upstreamHost  string
-	logger        *slog.Logger
+	cfg          config.Config
+	proxy        *httputil.ReverseProxy
+	enforcement  *Enforcement
+	releaser     BudgetReleaser
+	settler      BudgetSettler
+	balances     BalanceReader
+	extractor    usage.UsageExtractor
+	streamExt    usage.StreamExtractor
+	estimateCfg  budget.EstimateConfig
+	metrics      *budget.Metrics
+	alerter      *budget.Alerter
+	usageLogger  store.UsageLogger
+	bucketReg    store.OrgStore
+	upstreamURL  *url.URL
+	upstreamHost string
+	providers    *providerRoutes
+	logger       *slog.Logger
 }
 
 func NewHandler(
@@ -110,6 +111,7 @@ func NewHandlerWithRegistry(
 		bucketReg:    bucketReg,
 		upstreamURL:  upstream,
 		upstreamHost: cfg.UpstreamHost,
+		providers:    newProviderRoutes(cfg, upstream, cfg.UpstreamHost, extractor, streamExt),
 		logger:       logger,
 	}
 
@@ -135,6 +137,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		requestID = uuid.New().String()
 		r.Header.Set("X-Request-Id", requestID)
 	}
+
+	route := h.providers.resolve(r.URL.Path)
+	r.URL.Path = route.ForwardPath
+
 	bucketID := r.Header.Get("X-Budget-Bucket-Id")
 	orgID := OrgIDFromContext(r.Context())
 	orgWebhook := OrgWebhookFromContext(r.Context())
@@ -205,6 +211,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx = context.WithValue(ctx, bucketIDContextKey, bucketID)
 	ctx = context.WithValue(ctx, orgIDContextKey, orgID)
 	ctx = context.WithValue(ctx, orgWebhookContextKey, orgWebhook)
+	ctx = withProviderRoute(ctx, route)
 	h.proxy.ServeHTTP(w, r.WithContext(ctx))
 }
 
@@ -232,6 +239,19 @@ func (h *Handler) modifyResponse(resp *http.Response) error {
 	}
 
 	if resp.StatusCode == 200 && h.settler != nil && requestID != "" {
+		route, _ := providerRouteFromContext(resp.Request.Context())
+		providerHost := route.UpstreamHost
+		if providerHost == "" {
+			providerHost = h.upstreamHost
+		}
+		jsonExt := route.JSON
+		if jsonExt == nil {
+			jsonExt = h.extractor
+		}
+		streamExt := route.Stream
+		if streamExt == nil {
+			streamExt = h.streamExt
+		}
 		params := settlementParams{
 			settler:     h.settler,
 			balances:    h.balances,
@@ -243,14 +263,14 @@ func (h *Handler) modifyResponse(resp *http.Response) error {
 			orgID:       orgID,
 			orgWebhook:  OrgWebhookFromContext(resp.Request.Context()),
 			bucketID:    bucketID,
-			provider:    h.upstreamHost,
+			provider:    providerHost,
 			reserved:    reserved,
 			logger:      h.logger,
 		}
-		if isEventStream(resp.Header) && h.streamExt != nil {
-			resp.Body = newStreamTap(resp.Body, h.streamExt, params)
-		} else if h.extractor != nil && !isEventStream(resp.Header) {
-			resp.Body = newSettlingReader(resp.Body, h.extractor, params)
+		if isEventStream(resp.Header) && streamExt != nil {
+			resp.Body = newStreamTap(resp.Body, streamExt, params)
+		} else if jsonExt != nil && !isEventStream(resp.Header) {
+			resp.Body = newSettlingReader(resp.Body, jsonExt, params)
 		}
 	}
 
@@ -264,6 +284,10 @@ func (h *Handler) logRelease(ctx context.Context, orgID, requestID, bucketID str
 	if orgID == "" {
 		orgID = store.DefaultOrgID
 	}
+	providerHost := h.upstreamHost
+	if route, ok := providerRouteFromContext(ctx); ok && route.UpstreamHost != "" {
+		providerHost = route.UpstreamHost
+	}
 	if err := h.usageLogger.LogUsage(ctx, store.UsageEvent{
 		OrgID:     orgID,
 		BucketID:  bucketID,
@@ -271,7 +295,7 @@ func (h *Handler) logRelease(ctx context.Context, orgID, requestID, bucketID str
 		Reserved:  reserved,
 		Actual:    0,
 		Outcome:   "released",
-		Provider:  h.upstreamHost,
+		Provider:  providerHost,
 	}); err != nil {
 		h.logger.Error("failed to log release usage event",
 			"request_id", requestID,
@@ -281,14 +305,21 @@ func (h *Handler) logRelease(ctx context.Context, orgID, requestID, bucketID str
 }
 
 func (h *Handler) director(req *http.Request) {
-	req.URL.Scheme = h.upstreamURL.Scheme
-	req.URL.Host = h.upstreamURL.Host
-	if h.upstreamURL.Path != "" && h.upstreamURL.Path != "/" {
-		req.URL.Path = singleJoiningSlash(h.upstreamURL.Path, req.URL.Path)
+	upstreamURL := h.upstreamURL
+	upstreamHost := h.upstreamHost
+	if route, ok := providerRouteFromContext(req.Context()); ok && route.UpstreamURL != nil {
+		upstreamURL = route.UpstreamURL
+		upstreamHost = route.UpstreamHost
 	}
-	req.Host = h.upstreamHost
 
-	SanitizeRequestHeaders(req.Header, h.upstreamHost)
+	req.URL.Scheme = upstreamURL.Scheme
+	req.URL.Host = upstreamURL.Host
+	if upstreamURL.Path != "" && upstreamURL.Path != "/" {
+		req.URL.Path = singleJoiningSlash(upstreamURL.Path, req.URL.Path)
+	}
+	req.Host = upstreamHost
+
+	SanitizeRequestHeaders(req.Header, upstreamHost)
 }
 
 func (h *Handler) errorHandler(w http.ResponseWriter, r *http.Request, err error) {

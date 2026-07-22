@@ -17,14 +17,18 @@ const (
 )
 
 type Config struct {
-	ListenAddr       string
-	UpstreamURL      string
-	UpstreamHost     string
-	EnforcementMode  EnforcementMode
-	MaxIdleConns     int
-	MaxIdlePerHost   int
-	IdleConnTimeout  time.Duration
-	PreCheckTimeout  time.Duration
+	ListenAddr            string
+	UpstreamURL           string
+	UpstreamHost          string
+	OpenAIUpstreamURL     string
+	OpenAIUpstreamHost    string
+	AnthropicUpstreamURL  string
+	AnthropicUpstreamHost string
+	EnforcementMode       EnforcementMode
+	MaxIdleConns          int
+	MaxIdlePerHost        int
+	IdleConnTimeout       time.Duration
+	PreCheckTimeout       time.Duration
 
 	RedisURL              string
 	RedisPoolSize         int
@@ -37,14 +41,14 @@ type Config struct {
 	AdminAPIKey           string
 	DatabaseURL           string
 
-	StripeSecretKey      string
-	StripeWebhookSecret  string
-	StripePriceIndie     string
-	StripePriceTeam      string
-	StripeSuccessURL     string
-	StripeCancelURL      string
+	StripeSecretKey     string
+	StripeWebhookSecret string
+	StripePriceIndie    string
+	StripePriceTeam     string
+	StripeSuccessURL    string
+	StripeCancelURL     string
 
-	PublicBaseURL    string
+	PublicBaseURL     string
 	TrialBudgetTokens int64
 }
 
@@ -58,6 +62,10 @@ func Load() (Config, error) {
 
 	upstreamURL := getEnv("UPSTREAM_URL", "https://api.openai.com")
 	upstreamHost := getEnv("UPSTREAM_HOST", "api.openai.com")
+	openaiUpstreamURL := getEnv("OPENAI_UPSTREAM_URL", "https://api.openai.com")
+	openaiUpstreamHost := getEnv("OPENAI_UPSTREAM_HOST", "api.openai.com")
+	anthropicUpstreamURL := getEnv("ANTHROPIC_UPSTREAM_URL", "https://api.anthropic.com")
+	anthropicUpstreamHost := getEnv("ANTHROPIC_UPSTREAM_HOST", "api.anthropic.com")
 
 	maxIdle, err := strconv.Atoi(getEnv("HTTP_MAX_IDLE_CONNS", "100"))
 	if err != nil {
@@ -118,6 +126,10 @@ func Load() (Config, error) {
 		ListenAddr:            getEnv("LISTEN_ADDR", ":8080"),
 		UpstreamURL:           upstreamURL,
 		UpstreamHost:          upstreamHost,
+		OpenAIUpstreamURL:     openaiUpstreamURL,
+		OpenAIUpstreamHost:    openaiUpstreamHost,
+		AnthropicUpstreamURL:  anthropicUpstreamURL,
+		AnthropicUpstreamHost: anthropicUpstreamHost,
 		EnforcementMode:       mode,
 		MaxIdleConns:          maxIdle,
 		MaxIdlePerHost:        maxIdlePerHost,

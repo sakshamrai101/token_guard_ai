@@ -301,3 +301,16 @@ Gemini, OpenAI-compatible picker UI, self-serve signup polish, React dashboard, 
 - Do NOT implement multi-provider routing, Gemini, customer topup, or key remint in A1.
 - Operator `/ops` + admin APIs stay ADMIN_API_KEY-only.
 - TDD; all existing tests must pass; go test ./... green at end.
+
+---
+
+## M1 Multi-Provider Routing (branch multi-routing)
+
+- Implement entire M1 in one changeset per PLAN.md **M1 — Multi-Provider Routing** and ARCHITECTURE.md **§17**.
+- Path prefixes: `/openai/*` → OpenAI upstream + OpenAI extractors; `/anthropic/*` → Anthropic upstream + Anthropic extractors.
+- Strip provider prefix before forward; per-request upstream + extractors on context (Director + settle).
+- Keep legacy unprefixed paths on `UPSTREAM_URL` / `UPSTREAM_HOST` (backward compatible).
+- Same org/bucket budgets for both providers; do not add per-provider wallets.
+- Do NOT implement Gemini, Grok, body sniffing, or React dashboard.
+- Do not break `/admin`, `/me`, `/account`, `/ops`, `/signup`, `/setup`, `/billing`, health routes.
+- TDD; all existing tests must pass; go test ./... green at end.

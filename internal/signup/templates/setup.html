@@ -39,19 +39,19 @@
   <p>Default budget bucket: <code>default</code> (header optional).</p>
 
   <h2>curl</h2>
-  <pre>curl {{ .PublicBase }}/v1/chat/completions \
+  <pre>curl {{ .PublicBase }}/openai/v1/chat/completions \
   -H "Authorization: Bearer $OPENAI_API_KEY" \
   -H "X-TokenGuard-Key: {{ .Key }}" \
   -H "Content-Type: application/json" \
   -d '{"model":"gpt-4o-mini","max_tokens":50,"messages":[{"role":"user","content":"hi"}]}'</pre>
 
-  <h2>Python</h2>
+  <h2>Python (OpenAI)</h2>
   <pre>import os
 from openai import OpenAI
 
 client = OpenAI(
     api_key=os.environ["OPENAI_API_KEY"],
-    base_url="{{ .PublicBase }}/v1",
+    base_url="{{ .PublicBase }}/openai/v1",  # or "{{ .PublicBase }}/v1" for legacy single-upstream
     default_headers={"X-TokenGuard-Key": "{{ .Key }}"},
 )
 print(client.chat.completions.create(
@@ -59,6 +59,8 @@ print(client.chat.completions.create(
     messages=[{"role":"user","content":"hi"}],
     max_tokens=50,
 ))</pre>
+
+  <p>Anthropic SDK: <code>base_url="{{ .PublicBase }}/anthropic"</code> with the same <code>X-TokenGuard-Key</code>.</p>
 
   <h2>Optional: Slack alerts</h2>
   <form method="POST" action="/setup/slack">

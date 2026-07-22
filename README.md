@@ -6,7 +6,7 @@ Built for indie devs and small AI startups who want set-and-forget abuse protect
 
 ## What it does
 
-- Transparent reverse proxy to **OpenAI** or **Anthropic** (method, path, body unchanged)
+- Transparent reverse proxy to **OpenAI** and/or **Anthropic** (method, path, body unchanged)
 - **Pre-request budget reservation** via atomic Redis Lua scripts
 - **Post-response settlement** from provider usage metadata (stream + non-stream)
 - **429** when a bucket can't cover the estimated cost (`enforce` mode)
@@ -15,13 +15,15 @@ Built for indie devs and small AI startups who want set-and-forget abuse protect
 - **Admin API** for buckets, orgs, keys, usage dumps
 - **Hosted mode:** `X-TokenGuard-Key`, org-scoped Redis budgets, Stripe plans, Slack alerts, `/account` + `/me`, `/ops`
 
-Provider routing is by `UPSTREAM_HOST`: `api.openai.com` → OpenAI extractors; `api.anthropic.com` → Anthropic extractors. Run one proxy instance per provider.
+Provider routing: path prefixes `/openai/…` and `/anthropic/…` on one deploy (same `tg_` key + buckets). Unprefixed `/v1/…` still uses legacy `UPSTREAM_*` + `RegistryForHost`.
 
 See [PLAN.md](PLAN.md), [ARCHITECTURE.md](ARCHITECTURE.md), [ONBOARDING.md](ONBOARDING.md), and [docs/RUNBOOK.md](docs/RUNBOOK.md).
 
 **Self-serve (S1):** Customers use `/signup` → Stripe Checkout → `/setup?session_id=` (one-time `tg_` key). Admin mint is support fallback only.
 
-**Customer analytics (A1):** Org-scoped `GET /me/buckets`, `GET /me/usage`, `GET /me/org`, `PATCH /me/slack`, and minimal `/account` HTML (auth: `X-TokenGuard-Key`). Slack stays for alerts; customers should not need operator `/ops`.
+**Customer analytics (A1 — done):** Org-scoped `GET /me/buckets`, `GET /me/usage`, `GET /me/org`, `PATCH /me/slack`, and minimal `/account` HTML (auth: `X-TokenGuard-Key`). Slack stays for alerts; customers should not need operator `/ops`.
+
+**Multi-provider (M1 — done):** `/openai/…` + `/anthropic/…` on one process; same `tg_` key and buckets. Legacy `/v1/…` + `UPSTREAM_*` remains.
 
 ## Docker quick start (proxy + Redis + Postgres)
 
@@ -157,8 +159,9 @@ See [.env.example](.env.example) for all variables. Key settings:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `LISTEN_ADDR` | `:8080` | Proxy listen address |
-| `UPSTREAM_URL` | `https://api.openai.com` | Provider base URL |
-| `UPSTREAM_HOST` | `api.openai.com` | Host header rewrite + extractor selection |
+| `UPSTREAM_URL` / `UPSTREAM_HOST` | `https://api.openai.com` / `api.openai.com` | Legacy unprefixed paths |
+| `OPENAI_UPSTREAM_URL` / `OPENAI_UPSTREAM_HOST` | same OpenAI defaults | `/openai/*` routing |
+| `ANTHROPIC_UPSTREAM_URL` / `ANTHROPIC_UPSTREAM_HOST` | `https://api.anthropic.com` / `api.anthropic.com` | `/anthropic/*` routing |
 | `ENFORCEMENT_MODE` | `off` | `off`, `shadow`, or `enforce` |
 | `REDIS_URL` | `redis://localhost:6379` | Redis connection URL |
 | `DATABASE_URL` | — | Postgres; enables multi-tenant auth |

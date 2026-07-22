@@ -438,19 +438,79 @@ Do NOT combine phases. TDD each phase. `go test ./...` must stay green. Update [
 | Priority | Feature | Notes |
 |----------|---------|-------|
 | **S1** | Self-serve signup → Stripe → setup page with one-time key | **Done** — branch `self-serve` |
-| **A1 (NOW)** | Customer analytics: `/me` read APIs + minimal `/account` HTML | See **A1** below — **branch `analytics`** |
-| **P1** | One-app multi-provider routing (OpenAI + Anthropic on one deploy) | **Later — separate branch** (not A1) |
-| **P1** | Gemini native JSON + SSE extractors | After multi-provider |
-| **P1** | OpenAI-compatible upstream picker (Grok / custom base URL) | After multi-provider |
+| **A1** | Customer analytics: `/me` + `/account` | **Done** — branch `analytics` |
+| **M1 (NOW)** | One-app multi-provider routing (OpenAI + Anthropic) | See **M1** below — **branch `multi-routing`** |
+| **P1** | Gemini native JSON + SSE extractors | After M1 |
+| **P1** | OpenAI-compatible upstream picker (Grok / custom base URL) | After M1 |
 | **P2** | Real dashboard (React) | On demand — A1 is the lean stand-in |
 | **P2** | Slack interactive top-up / email alerts | On demand |
 | **P3** | SSO, Prometheus, community self-hosted docs | Later |
 
 ---
 
+## M1 — Multi-Provider Routing (OpenAI + Anthropic, one deploy)
+
+**Branch:** `multi-routing`  
+**Goal:** A single Token Guard hostname/process can budget-protect apps that call **both** OpenAI and Anthropic — same `tg_` key, same org/buckets, correct upstream + usage extractor per request.
+
+**Why now:** Many production apps use both providers. Today one `UPSTREAM_URL` per process forces two deploys or leaves half their traffic unguarded.
+
+**Quality bar:** Customer points OpenAI SDK at `…/openai/v1` and Anthropic SDK at `…/anthropic` (documented paths). Both reserve/settle against the same org Redis buckets. Legacy single-upstream `/v1/…` still works.
+
+### Locked decisions
+
+| Item | Choice |
+|------|--------|
+| Routing key | **URL path prefix** (not Host header, not body sniffing) |
+| OpenAI prefix | `/openai/` → strip prefix → forward to OpenAI upstream (`/openai/v1/chat/completions` → `/v1/chat/completions`) |
+| Anthropic prefix | `/anthropic/` → strip prefix → forward to Anthropic upstream (`/anthropic/v1/messages` → `/v1/messages`) |
+| Legacy path | Unprefixed proxy paths continue to use existing `UPSTREAM_URL` / `UPSTREAM_HOST` + `RegistryForHost` — **backward compatible** |
+| Extractors | **Per-request** — path selects OpenAI vs Anthropic JSON/SSE extractors |
+| Auth / budgets | Unchanged: `X-TokenGuard-Key`, `budget:{org_id}:{bucket_id}`, default bucket |
+| Config | `OPENAI_UPSTREAM_URL` / `OPENAI_UPSTREAM_HOST` and `ANTHROPIC_UPSTREAM_URL` / `ANTHROPIC_UPSTREAM_HOST` (defaults to api.openai.com / api.anthropic.com). Multi prefixes enabled when both provider URL pairs are configured (non-empty); always keep legacy `UPSTREAM_*` |
+| Gemini / Grok | **OUT of M1** |
+
+### Deliverables (single changeset — do it all)
+
+1. **Config + `.env.example`** — OpenAI + Anthropic upstream URL/host pairs; keep legacy `UPSTREAM_*`
+2. **Per-request provider on proxy handler** — detect from path; context carries upstream + extractors; `Director` rewrites host/path (strip prefix); settle uses selected extractors
+3. **Do not route** `/admin`, `/me`, `/account`, `/ops`, `/signup`, `/setup`, `/billing`, `/healthz`, `/readyz` through provider prefixes
+4. **Same budget identity** — OpenAI + Anthropic calls share org/bucket; integration test both settles decrement same balance
+5. **Docs** — README + ONBOARDING dual `base_url` examples; RUNBOOK multi vs single mode
+6. **Optional** — light `/setup` snippet update showing both base URLs if low-risk
+
+### Explicitly OUT of M1
+
+- Gemini, Grok, arbitrary compatible-base picker UI
+- Body-based provider detection
+- Separate Redis budgets per provider
+- Breaking removal of legacy single `UPSTREAM_URL` mode
+- React dashboard / auth / Stripe changes
+
+### M1 Definition of Done
+
+- [x] `/openai/v1/…` → OpenAI upstream + OpenAI extractors + settle
+- [x] `/anthropic/v1/…` → Anthropic upstream + Anthropic extractors + settle
+- [x] Same `tg_` key + bucket works for both; balance reflects both
+- [x] Legacy unprefixed path still uses `UPSTREAM_*` (regression)
+- [x] Stream + non-stream covered per provider (integration tests)
+- [x] App routes (admin/me/account/signup/…) unchanged
+- [x] Existing tests green; new routing tests; `go test ./...` green
+
+### Tests (required)
+
+- Path strip + Host rewrite unit tests (both prefixes)
+- Integration: mock OpenAI on `/openai/…` → OpenAI usage settle
+- Integration: mock Anthropic on `/anthropic/…` → Anthropic usage settle
+- Integration: OpenAI then Anthropic same bucket → correct final balance
+- Legacy `/v1/…` still hits `UPSTREAM_*` mock
+- Reserved app routes not captured by provider prefix logic
+
+---
+
 ## A1 — Customer Analytics (self-serve visibility)
 
-**Branch:** `analytics`  
+**Branch:** `analytics` (**done**)  
 **Goal:** Paying customers can inspect **their** bucket balances and recent usage **without** Slack-only alerts and **without** emailing the operator. Slack remains the push channel; `/account` + `/me` are the investigation surface.
 
 **Why now:** S1 gets them a key. Without org-scoped visibility, every “what’s my balance?” becomes a support ticket — weak for $15/mo.
@@ -609,7 +669,7 @@ Do NOT combine phases. TDD each phase. `go test ./...` must stay green. Update [
 | **S1 onboarding** | **Self-serve Checkout → `/setup` one-time key** | Operator mint is support fallback only |
 | **S1 default bucket** | **`default` auto-seeded; header optional** | Missing header uses org default — not fail-open |
 | **A1 customer visibility** | **`/me` APIs + `/account` HTML (tg_ auth)** | Slack = alerts; account = investigate; no React |
-| **Multi-provider (later)** | **Separate branch after A1** | One-app OpenAI+Anthropic routing — not A1 |
+| **M1 multi-provider** | **Path prefixes `/openai/` + `/anthropic/` on one process** | Same tg_ key + buckets; legacy `UPSTREAM_*` kept |
 
 ---
 

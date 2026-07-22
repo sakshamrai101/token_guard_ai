@@ -59,6 +59,12 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.ReservationTTL != 300*time.Second {
 		t.Fatalf("ReservationTTL = %v, want 300s", cfg.ReservationTTL)
 	}
+	if cfg.OpenAIUpstreamURL != "https://api.openai.com" || cfg.OpenAIUpstreamHost != "api.openai.com" {
+		t.Fatalf("openai upstream = %q/%q", cfg.OpenAIUpstreamURL, cfg.OpenAIUpstreamHost)
+	}
+	if cfg.AnthropicUpstreamURL != "https://api.anthropic.com" || cfg.AnthropicUpstreamHost != "api.anthropic.com" {
+		t.Fatalf("anthropic upstream = %q/%q", cfg.AnthropicUpstreamURL, cfg.AnthropicUpstreamHost)
+	}
 }
 
 func TestLoadRedisConfigOverrides(t *testing.T) {

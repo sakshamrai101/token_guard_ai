@@ -213,4 +213,4 @@ test/integration/   End-to-end tests
 
 ## License
 
-TBD
+[MIT](LICENSE)
